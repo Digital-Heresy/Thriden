@@ -21,7 +21,7 @@
 #   thriden-scion-restore.sh <r2-key|local.zip[.age]> [--scion-id <id>] [--identity <age-key>]
 #
 #     <r2-key>     object key under the configured R2 bucket (e.g.
-#                  dm-cairn/20260619_151116_6afc66.zip), downloaded via
+#                  <scion>/<timestamp>_<hash>.zip), downloaded via
 #                  forge-web's stored R2 config; OR a path to a LOCAL archive.
 #     --scion-id   target Scion id (default: read from the archive manifest)
 #     --identity   age secret-key file, for an encrypted .zip.age archive
@@ -52,6 +52,13 @@ done
   echo "usage: $(basename "$0") <r2-key|local.zip[.age]> [--scion-id <id>] [--identity <age-key>]" >&2
   exit 2
 }
+# --scion-id is optional (the manifest carries it), but if supplied validate it
+# before it reaches the in-container CLI args below.
+case "$SCION_ID" in
+  *[!A-Za-z0-9._-]*)
+    echo "ERROR: invalid --scion-id '$SCION_ID' (allowed: letters, digits, . _ -)." >&2
+    exit 2 ;;
+esac
 
 if [ "$(id -un)" != "$DEPLOY_USER" ]; then
   echo ">> elevating to '$DEPLOY_USER' ..." >&2

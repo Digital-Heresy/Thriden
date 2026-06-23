@@ -32,6 +32,14 @@ if [ -z "$SCION_ID" ]; then
   echo "usage: $(basename "$0") <scion-id>" >&2
   exit 2
 fi
+# A scion id is server-side constrained to this charset. Validate before it
+# ever reaches a sops `sh -c` string below — anything else is bogus and could
+# be a shell-injection attempt (e.g. `x; rm -rf /`).
+case "$SCION_ID" in
+  *[!A-Za-z0-9._-]*)
+    echo "ERROR: invalid scion id '$SCION_ID' (allowed: letters, digits, . _ -)." >&2
+    exit 2 ;;
+esac
 
 # The stack dir (writes) and the sops age key (decrypt) belong to the
 # deploy service account. If we're not it yet, re-exec under it; the
@@ -68,14 +76,22 @@ raven_var="${upper}_RAVEN_TOKEN"
 # Bring-up bindings, sourced from Mongo. <SHORT>_SOUL_ID + <SHORT>_RAVEN_TOKEN
 # already live on the Scion's Mongo doc (Genesis stored them), so fetch them
 # straight from there via the in-container CLI — no operator-wired SOPS/git.
-# `set -a` + eval exports them into our env; the stack-env `sops exec-env up`
-# below layers stack vars on top of this parent env, so these per-Scion keys
-# carry straight through to the containers' ${<SHORT>_SOUL_ID} interpolation.
+# runtime-env emits shell-safe `KEY=value` lines — PF's cmd_runtime_env asserts
+# both values match ^[A-Za-z0-9_.-]+$ before printing. We parse + export them
+# directly (the same read-loop the per-Scion SOPS overlay uses below) rather
+# than `eval`-ing the command output, so a regression in that emitter guard
+# can't turn a corrupt Mongo doc into host code execution here. The exported
+# vars layer under the stack-env `sops exec-env up` below and carry straight
+# through to the containers' ${<SHORT>_SOUL_ID} interpolation.
 echo ">> fetching $soul_var + $raven_var from Mongo ..." >&2
-set -a
-eval "$(sops exec-env "$SECRETS" \
-  "$BASE_COMPOSE exec -T forge-web personaforge-admin scion runtime-env $SCION_ID")"
-set +a
+while IFS= read -r line; do
+  case "$line" in
+    ''|'#'*)        continue ;;
+    [A-Za-z_]*=*)   export "$line" ;;
+    *)              echo "WARN: ignoring unexpected runtime-env line" >&2 ;;
+  esac
+done < <(sops exec-env "$SECRETS" \
+  "$BASE_COMPOSE exec -T forge-web personaforge-admin scion runtime-env $SCION_ID")
 
 # Opt-in override: if an operator has staged a per-Scion SOPS file (the future
 # Scion-managed-vault tier), overlay it on top so it shadows the Mongo values.

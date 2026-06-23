@@ -34,6 +34,15 @@ case "${1:-}" in
   "")      echo "usage: $(basename "$0") <scion-id>  |  --short <short>" >&2; exit 2 ;;
   *)       scion_id="$1" ;;
 esac
+# Reject ids/shorts carrying shell metacharacters before they reach the
+# in-container CLI args + the short-derived container/volume names below.
+for _v in "$scion_id" "$short"; do
+  case "$_v" in
+    *[!A-Za-z0-9._-]*)
+      echo "ERROR: invalid scion id/short '$_v' (allowed: letters, digits, . _ -)." >&2
+      exit 2 ;;
+  esac
+done
 
 if [ "$(id -un)" != "$DEPLOY_USER" ]; then
   echo ">> elevating to '$DEPLOY_USER' ..." >&2

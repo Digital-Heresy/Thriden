@@ -7,16 +7,16 @@
 # Phases 3 (SOPS host key), 4 (network hardening), 5 (smoke validation) are
 # operator-driven and stay manual -- see the doc for the procedures.
 #
-# Usage (on the Pi5 itself, as the operator account):
-#   curl -fL https://raw.githubusercontent.com/Digital-Heresy/MindHive/main/bin/pi5-bootstrap.sh -o /tmp/bootstrap.sh
+# Usage (on the host itself, as the operator account):
+#   curl -fL https://raw.githubusercontent.com/Digital-Heresy/Thriden/main/bin/pi5-bootstrap.sh -o /tmp/bootstrap.sh
 #   bash /tmp/bootstrap.sh
 #
-# Or after `git clone` of the MindHive repo:
+# Or after `git clone` of the Thriden deploy-recipe repo:
 #   bash bin/pi5-bootstrap.sh
 #
 # Exit codes:
 #   0  -- all phases completed (or already done) successfully
-#   1  -- a pre-flight check failed (not Pi5, not Linux, no sudo, etc.)
+#   1  -- a pre-flight check failed (no sudo, etc.)
 #   2  -- apt operation failed
 #   3  -- docker / compose not installed (operator must install manually first)
 
@@ -33,9 +33,12 @@ require() {
 
 echo "[*] pi5-bootstrap.sh -- pre-flight checks"
 
-if [[ "$(uname -m)" != "aarch64" ]]; then
-  echo "[!] expected aarch64 (Pi5), got $(uname -m). Aborting." >&2
-  exit 1
+arch="$(uname -m)"
+if [[ "$arch" != "aarch64" ]]; then
+  echo "[!] note: this script is tuned for aarch64 (Pi5); detected '$arch'." >&2
+  echo "    Its host-prep (apt, the deploy user, /srv/thriden) is arch-agnostic" >&2
+  echo "    and works on a Debian/Ubuntu x86_64 host too — continuing." >&2
+  echo "    (Not for non-Debian or Windows hosts; see the onboarding docs.)" >&2
 fi
 
 # We need sudo. Use -n (non-interactive) so the script fails fast on a
