@@ -1,0 +1,54 @@
+# Thriden deploy recipe — generated from upstream; do not edit here.
+services:
+
+  forge-web:
+    image: ghcr.io/digital-heresy/forge:${FORGE_VERSION:-v0.2.4}
+    pull_policy: missing
+    ports: !override
+      - "0.0.0.0:8200:8200"
+    environment:
+      PERSONAFORGE_WEB_SECURE_COOKIES: ${PERSONAFORGE_WEB_SECURE_COOKIES:-off}
+      NOOSCOPE_URL: ${NOOSCOPE_URL:-}
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      GH_TOKEN: ${GH_TOKEN:-}
+    networks: !override
+      - backend
+      - proxy-net
+
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    environment:
+      CONTAINERS: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - proxy-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  nooscope:
+    image: ghcr.io/digital-heresy/nooscope:${NOOSCOPE_VERSION:-v0.1.1}
+    pull_policy: missing
+    ports: !override
+      - "0.0.0.0:8080:8080"
+    environment:
+      NOOSCOPE_HOST: ${NOOSCOPE_HOST:-thriden}
+    depends_on: !override
+      forge-web:
+        condition: service_healthy
+
+
+
+volumes:
+  mongo-data:
+    external: !reset null
+    name: !reset null
+
+networks:
+  proxy-net:
+    driver: bridge
+    internal: true

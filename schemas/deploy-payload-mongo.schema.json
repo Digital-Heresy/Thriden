@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Digital-Heresy/MindHive/schemas/deploy-payload-mongo.schema.json",
+  "title": "Thriden upgrade payload manifest (Mongo collection shape, Phase 3)",
+  "description": "Document shape for the `personaforge.deploy_payloads` collection consumed by `bin/thriden-deploy-payload.sh -i <_id>`. Extends `deploy-payload.schema.json` (Phase 1 input shape) with wrapper-managed and PF-managed fields. Applied as the collection validator by `bin/thriden-deploy-payloads-setup.sh`. See docs/design-upgrade-at-wake.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["thriden_version", "components", "ordering", "status", "written_by", "created_at"],
+  "properties": {
+    "_id": {
+      "description": "Mongo ObjectId. Auto-generated unless PF explicitly sets one.",
+      "bsonType": "objectId"
+    },
+    "thriden_version": {
+      "type": "string",
+      "description": "Human-meaningful label for this bundle. Mirrors the Phase 1 input field; not load-bearing."
+    },
+    "components": {
+      "type": "object",
+      "description": "Map of logical component name to image tag. Same constraint as the Phase 1 input schema. Mongo's $jsonSchema doesn't support propertyNames, so the per-key constraint is unrolled into explicit properties + additionalProperties: false.",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "engram":   { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+        "forge":    { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+        "nooscope": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" }
+      }
+    },
+    "ordering": {
+      "type": "array",
+      "description": "Swap + smoke order. Rollback runs in reverse. Same constraint as Phase 1.",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": ["engram", "forge", "nooscope"]
+      }
+    },
+    "smoke_tier_overrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "engram":   { "bsonType": "int", "enum": [0, 1, 2] },
+        "forge":    { "bsonType": "int", "enum": [0, 1, 2] },
+        "nooscope": { "bsonType": "int", "enum": [0, 1, 2] }
+      }
+    },
+    "status": {
+      "description": "Payload state machine. PF writes documents with status: pending; the wrapper transitions through in_progress to one of the terminal states. cancelled is operator-set via mongosh to take a pending payload out of the running.",
+      "enum": ["pending", "in_progress", "succeeded", "rolled_back", "failed", "cancelled"]
+    },
+    "written_by": {
+      "type": "string",
+      "description": "Operator identifier from the Forge UI session that scheduled the payload."
+    },
+    "created_at": {
+      "description": "When PF wrote the payload to Mongo.",
+      "bsonType": "date"
+    },
+    "claimed_by_scion": {
+      "type": "string",
+      "description": "Set by the wrapper at claim time (atomic findOneAndUpdate from pending → in_progress). The scion short name (e.g. 'helix'). Distinguishes which scion's orchestrator picked the payload up if multiple are scoped."
+    },
+    "triggered_at": {
+      "description": "Set at claim time alongside claimed_by_scion.",
+      "bsonType": "date"
+    },
+    "completed_at": {
+      "description": "Set when the wrapper last calls finalize(). For the normal terminal states (succeeded / rolled_back / failed) this marks genuine completion. For the crash-exit path the wrapper calls finalize(in_progress), so completed_at present with status=in_progress is the sentinel that the wrapper died mid-run and the doc is awaiting manual review — it does NOT mean the payload finished successfully.",
+      "bsonType": "date"
+    },
+    "result": {
+      "type": "object",
+      "description": "Terminal-state detail. Populated alongside completed_at.",
+      "properties": {
+        "succeeded_components": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "failed_component": {
+          "type": "string"
+        },
+        "failure_kind": {
+          "enum": ["startup_crash", "healthcheck_timeout", "smoke_test_failed", "wrapper_error", "manual_review_needed"]
+        },
+        "rollback_reason": {
+          "type": "string"
+        }
+      }
+    },
+    "pre_flight_backups": {
+      "type": "object",
+      "description": "Per-scion paths to the pre-flight /admin/export snapshots. Keyed by scion short name; values are absolute paths on the host (under /srv/thriden/backups/<scion>/).",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "original_tags": {
+      "type": "object",
+      "description": "Per-component image tag values captured before the pin step, so a wrapper rollback can revert deterministically.",
+      "additionalProperties": false,
+      "properties": {
+        "engram":   { "type": "string" },
+        "forge":    { "type": "string" },
+        "nooscope": { "type": "string" }
+      }
+    },
+    "failure_kind": {
+      "description": "Wrapper sets this at top level on certain failure paths (legacy from Phase 1 file mode). Mirror of result.failure_kind for callers that don't traverse the nested object.",
+      "enum": ["startup_crash", "healthcheck_timeout", "smoke_test_failed", "wrapper_error", "manual_review_needed"]
+    },
+    "failed_component": {
+      "type": "string",
+      "description": "Top-level mirror of result.failed_component (same Phase 1 legacy reason)."
+    },
+    "succeeded_components": {
+      "type": "array",
+      "description": "Top-level mirror of result.succeeded_components (same Phase 1 legacy reason).",
+      "items": { "type": "string" }
+    },
+    "logs": {
+      "type": "array",
+      "description": "Append-only log of wrapper progress. Each entry is pushed by the wrapper's log() helper.",
+      "items": {
+        "type": "object",
+        "required": ["ts", "level", "msg"],
+        "additionalProperties": false,
+        "properties": {
+          "ts": { "type": "string" },
+          "level": { "enum": ["info", "warn", "error"] },
+          "msg": { "type": "string" }
+        }
+      }
+    }
+  }
+}

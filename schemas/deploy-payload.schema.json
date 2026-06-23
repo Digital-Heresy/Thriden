@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Digital-Heresy/MindHive/schemas/deploy-payload.schema.json",
+  "title": "Thriden upgrade payload manifest (Phase 1)",
+  "description": "Manifest consumed by bin/thriden-deploy-payload.sh. Phase 1 is file-based; Phase 3 will reuse this shape as the input half of the Mongo deploy_payloads document. See docs/design-upgrade-at-wake.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["thriden_version", "components", "ordering"],
+  "properties": {
+    "thriden_version": {
+      "type": "string",
+      "description": "Human-meaningful label for this bundle. Not load-bearing — appears in logs and the result file."
+    },
+    "components": {
+      "type": "object",
+      "description": "Map of logical component name to image tag. Logical names map to compose env vars (engram → ENGRAM_VERSION, forge → FORGE_VERSION, nooscope → NOOSCOPE_VERSION) which are interpolated into image: refs in compose.prod.yml.",
+      "minProperties": 1,
+      "propertyNames": {
+        "enum": ["engram", "forge", "nooscope"]
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9._-]+$",
+        "description": "Image tag (e.g. 'main', 'main-abc123', 'v1.5.0'). Must exist in GHCR for the component's image. Constrained to GHCR-legal tag chars (alphanumeric + . _ -) so the wrapper's `sops set` call can't be tricked into emitting malformed JSON by a tag containing quotes or shell metacharacters."
+      }
+    },
+    "ordering": {
+      "type": "array",
+      "description": "Order in which to swap + smoke-test components. Rollback runs in reverse. Must include exactly the keys present in 'components'.",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": ["engram", "forge", "nooscope"]
+      }
+    },
+    "smoke_tier_overrides": {
+      "type": "object",
+      "description": "Override default smoke-test tier per component. Default: tier 1 (liveness + healthcheck) for engram/forge/nooscope. Tier 0 = liveness only (no HTTP probe). Tier 2 = liveness + healthcheck + canary query — engram only, Phase 2 dependency (requires /admin/canary endpoint).",
+      "propertyNames": {
+        "enum": ["engram", "forge", "nooscope"]
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "enum": [0, 1, 2]
+      }
+    }
+  }
+}

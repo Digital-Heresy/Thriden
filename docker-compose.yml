@@ -1,0 +1,114 @@
+# Thriden deploy recipe — generated from upstream; do not edit here.
+services:
+  mongodb:
+    image: mongo:7
+    ports:
+    - 127.0.0.1:27017:27017
+    volumes:
+    - mongo-data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: personaforge
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-engram_admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD must be set}
+    healthcheck:
+      test: mongosh "mongodb://${MONGO_ROOT_USER:-engram_admin}:${MONGO_ROOT_PASSWORD}@localhost:27017/admin?authSource=admin" --eval "db.runCommand('ping').ok" --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+    - backend
+    security_opt:
+    - no-new-privileges:true
+    cap_drop:
+    - ALL
+    cap_add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - FOWNER
+    - SETGID
+    - SETUID
+    mem_limit: 2G
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+  forge-web:
+    command:
+    - python
+    - -m
+    - forge.admin.web.server
+    dns:
+    - 8.8.8.8
+    - 1.1.1.1
+    environment:
+      PERSONAFORGE_WEB_HOST: 0.0.0.0
+      PERSONAFORGE_WEB_PORT: '8200'
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-engram_admin}:${MONGO_ROOT_PASSWORD}@mongodb:27017/personaforge?authSource=admin
+      MONGO_DB: personaforge
+      HIVEMIND_URL: http://fleet-manager:4000
+      HIVEMIND_RAVEN_TOKEN: ${HIVEMIND_RAVEN_TOKEN:-}
+      FORGE_WEB_ADMIN_TOKEN: ${FORGE_WEB_ADMIN_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      BFL_API_KEY: ${BFL_API_KEY:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      NOOSCOPE_URL: ${NOOSCOPE_URL:-}
+    ports:
+    - 127.0.0.1:8200:8200
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PERSONAFORGE_WEB_PORT:-8200}/scions')"
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+    networks:
+    - backend
+    security_opt:
+    - no-new-privileges:true
+    cap_drop:
+    - ALL
+    mem_limit: 512M
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+  nooscope:
+    ports:
+    - 127.0.0.1:8080:8080
+    environment:
+      NOOSCOPE_HOST: localhost:8080
+      NOOSCOPE_ADMIN_PASSWORD: ${NOOSCOPE_ADMIN_PASSWORD:-}
+      RAVEN_TOKEN_SPEAKER: ${SPEAKER_RAVEN_TOKEN:-}
+      RAVEN_TOKEN_HELIX: ${HELIX_RAVEN_TOKEN:-}
+      MORPHEUS_TOKEN_SPEAKER: ${SPEAKER_MORPHEUS_TOKEN:-}
+      MORPHEUS_TOKEN_HELIX: ${HELIX_MORPHEUS_TOKEN:-}
+      FORGE_WEB_ADMIN_TOKEN: ${FORGE_WEB_ADMIN_TOKEN:-}
+    restart: unless-stopped
+    networks:
+    - frontend
+    - backend
+    security_opt:
+    - no-new-privileges:true
+    cap_drop:
+    - ALL
+    mem_limit: 128M
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+volumes:
+  mongo-data:
+    external: true
+    name: docker_mongo_data
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
