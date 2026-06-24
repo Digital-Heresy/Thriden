@@ -2,7 +2,7 @@
 services:
 
   forge-web:
-    image: ghcr.io/digital-heresy/forge:${FORGE_VERSION:-v0.2.4}
+    image: ghcr.io/digital-heresy/forge:${FORGE_VERSION:-v0.3.0}
     pull_policy: missing
     ports: !override
       - "0.0.0.0:8200:8200"
@@ -31,7 +31,7 @@ services:
       - ALL
 
   nooscope:
-    image: ghcr.io/digital-heresy/nooscope:${NOOSCOPE_VERSION:-v0.1.1}
+    image: ghcr.io/digital-heresy/nooscope:${NOOSCOPE_VERSION:-v0.2.0}
     pull_policy: missing
     ports: !override
       - "0.0.0.0:8080:8080"
