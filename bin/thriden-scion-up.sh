@@ -51,6 +51,12 @@ fi
 
 cd "$STACK_DIR"
 
+# Pin component versions from the non-secret manifest () so a host
+# migrated off stack.enc.env version pins still gets a pinned ENGRAM_VERSION /
+# FORGE_RUNTIME_VERSION rather than the `:-main` footgun. A *_VERSION still in
+# stack.enc.env wins — `sops exec-env "$SECRETS"` layers it on top below.
+[ -f deploy/versions.env ] && { set -a; . ./deploy/versions.env; set +a; }
+
 echo ">> rendering image-pinned compose for '$SCION_ID' ..." >&2
 yaml="$(sops exec-env "$SECRETS" \
   "$BASE_COMPOSE exec -T forge-web personaforge-admin scion runtime-compose $SCION_ID --image")"

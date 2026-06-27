@@ -2,13 +2,14 @@
 services:
 
   forge-web:
-    image: ghcr.io/digital-heresy/forge:${FORGE_VERSION:-v0.4.0}
+    image: ghcr.io/digital-heresy/forge:${FORGE_VERSION:-v0.5.0}
     pull_policy: missing
     ports: !override
       - "0.0.0.0:8200:8200"
     environment:
       PERSONAFORGE_WEB_SECURE_COOKIES: ${PERSONAFORGE_WEB_SECURE_COOKIES:-off}
       NOOSCOPE_URL: ${NOOSCOPE_URL:-}
+      NOOSCOPE_INTERNAL_URL: ${NOOSCOPE_INTERNAL_URL:-http://nooscope:8080}
       DOCKER_HOST: tcp://docker-socket-proxy:2375
       GH_TOKEN: ${GH_TOKEN:-}
     networks: !override
@@ -31,7 +32,7 @@ services:
       - ALL
 
   nooscope:
-    image: ghcr.io/digital-heresy/nooscope:${NOOSCOPE_VERSION:-v0.2.0}
+    image: ghcr.io/digital-heresy/nooscope:${NOOSCOPE_VERSION:-v0.3.0}
     pull_policy: missing
     ports: !override
       - "0.0.0.0:8080:8080"

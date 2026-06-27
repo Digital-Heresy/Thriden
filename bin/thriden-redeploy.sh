@@ -40,6 +40,11 @@ cd "$STACK_DIR"
 proj="${COMPOSE_PROJECT_NAME:-$(basename "$STACK_DIR")}"
 stack_env="secrets/prod/stack.enc.env"
 
+# Pin versions from the non-secret manifest () so a host migrated
+# off stack.enc.env pins resolves a real tag below, not `:-main`. A *_VERSION
+# still in stack.enc.env wins (sops exec-env layers it on top in the resolve).
+[ -f deploy/versions.env ] && { set -a; . ./deploy/versions.env; set +a; }
+
 # Host short for the GHCR pull credential (single dir under hosts/).
 host_short="${THRIDEN_HOST_SHORT:-}"
 [ -n "$host_short" ] || host_short="$(ls secrets/prod/hosts/ 2>/dev/null | head -n1)"
