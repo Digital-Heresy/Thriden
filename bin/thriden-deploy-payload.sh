@@ -41,15 +41,17 @@ mongo_id=""
 host_short=""
 result_file=""
 scion_label=""
+do_sync=0
 
-while getopts "m:i:h:r:s:" opt; do
+while getopts "m:i:h:r:s:S" opt; do
   case "$opt" in
     m) manifest="$OPTARG" ;;
     i) mongo_id="$OPTARG" ;;
     h) host_short="$OPTARG" ;;
     r) result_file="$OPTARG" ;;
     s) scion_label="$OPTARG" ;;
-    *) echo "usage: $0 (-m <manifest-file> | -i <mongo-objectid>) [-h <host-short>] [-r <result-file>] [-s <scion-label>]" >&2; exit 2 ;;
+    S) do_sync=1 ;;
+    *) echo "usage: $0 (-m <manifest-file> | -i <mongo-objectid>) [-h <host-short>] [-r <result-file>] [-s <scion-label>] [-S]" >&2; exit 2 ;;
   esac
 done
 
@@ -66,6 +68,65 @@ fi
 if [[ -n "$manifest" && ! -f "$manifest" ]]; then
   echo "ERROR: manifest $manifest not found" >&2
   exit 1
+fi
+
+# ── Optional git self-sync (-S) ────────────────────────────────────────
+#
+# Bring the stack tree to the manifest's `thriden_version` BEFORE deploying,
+# so a release that changes compose *structure* (new service / env var /
+# per-Scion compose / bin script) rides a single Forge "schedule" click
+# instead of needing a manual `git pull` first ().
+#
+# File mode only, on purpose:
+#   - there is no Mongo claim to order against, and thriden_version is
+#     readable up front (in -i mode the claim happens later, and checking
+#     out mid-claim would risk a double-claim);
+#   - the checkout rewrites this very script + the compose files under the
+#     running process, so we re-exec the now-current version (guarded) to
+#     run the rest of the lifecycle from the checked-out release, not the
+#     bytes bash half-read before the checkout.
+# The direct -i (Mongo) sync is the host-side wake harness's job
+# (checkout-then-invoke) -- see .
+if [[ "$do_sync" == 1 && -z "${THRIDEN_PAYLOAD_SYNCED:-}" ]]; then
+  if [[ -n "$mongo_id" ]]; then
+    echo "ERROR: -S (git self-sync) requires file mode (-m); for -i the wake harness must checkout before invoking" >&2
+    exit 2
+  fi
+  for t in git jq; do
+    if ! command -v "$t" >/dev/null; then
+      echo "ERROR: -S given but '$t' is not in PATH" >&2
+      exit 1
+    fi
+  done
+  sync_target=$(jq -r '.thriden_version // empty' "$manifest")
+  if [[ -z "$sync_target" ]]; then
+    echo "ERROR: -S given but manifest carries no thriden_version to sync to" >&2
+    exit 2
+  fi
+  # No-op fast path: already exactly at the target tag.
+  if [[ "$(git describe --tags --exact-match HEAD 2>/dev/null || true)" != "$sync_target" ]]; then
+    # A deploy host must be pristine -- refuse rather than clobber local work.
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+      echo "ERROR: -S refusing to checkout over a dirty tree; resolve local changes first" >&2
+      exit 1
+    fi
+    echo "[sync] fetching tags + checking out $sync_target" >&2
+    if ! git fetch --tags --quiet; then
+      echo "ERROR: -S git fetch failed; refusing to deploy a possibly-stale tree" >&2
+      exit 1
+    fi
+    if ! git rev-parse -q --verify "refs/tags/${sync_target}^{commit}" >/dev/null; then
+      echo "ERROR: -S target tag '$sync_target' not found after fetch" >&2
+      exit 1
+    fi
+    if ! git checkout --quiet "$sync_target"; then
+      echo "ERROR: -S checkout of '$sync_target' failed" >&2
+      exit 1
+    fi
+  fi
+  # Re-exec the (now-current) script; guard prevents a sync loop.
+  export THRIDEN_PAYLOAD_SYNCED=1
+  exec "$0" "$@"
 fi
 if [[ -n "$mongo_id" && ! "$mongo_id" =~ ^[a-fA-F0-9]{24}$ ]]; then
   echo "ERROR: -i value '$mongo_id' is not a valid Mongo ObjectId (24 hex chars)" >&2

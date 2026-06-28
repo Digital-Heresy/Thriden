@@ -1,0 +1,17 @@
+# Polls for scheduled Thriden upgrade-at-wake payloads (MindHive-fi46).
+#
+# 60s cadence: the dispatch window is the Scion's torpor period (hours), so a
+# minute of latency is irrelevant and the poll is cheap (one mongosh query).
+# Install alongside thriden-deploy-dispatch.service (see that file's header).
+[Unit]
+Description=Poll for scheduled Thriden upgrade-at-wake payloads
+Documentation=file:/srv/thriden/docs/design-upgrade-at-wake.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=15s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

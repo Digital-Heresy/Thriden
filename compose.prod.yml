@@ -2,7 +2,7 @@
 services:
 
   forge-web:
-    image: ghcr.io/digital-heresy/forge:${FORGE_VERSION:-v0.6.0}
+    image: ghcr.io/digital-heresy/forge:${FORGE_VERSION:-v0.7.0}
     pull_policy: missing
     ports: !override
       - "0.0.0.0:8200:8200"

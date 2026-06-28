@@ -45,6 +45,18 @@
         "nooscope": { "bsonType": "int", "enum": [0, 1, 2] }
       }
     },
+    "scion_scope": {
+      "description": "Which Scions this payload targets, set by the Forge scheduler () at write time. Either the string \"all\" or a non-empty array of Scion short names (e.g. [\"dm\"]). Consumed by PF's Scion-side orchestrator (): it sets the dispatch signal (dispatch_scion/dispatch_ready_at) for its Scion only when scion_scope is \"all\", absent, or contains its short — absent is treated tolerantly as applicable. NOT consumed by the on-host wrapper, which deploys whatever services run on its host. Optional; absent = unscoped.",
+      "oneOf": [
+        { "enum": ["all"] },
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" }
+        }
+      ]
+    },
     "status": {
       "description": "Payload state machine. PF writes documents with status: pending; the wrapper transitions through in_progress to one of the terminal states. cancelled is operator-set via mongosh to take a pending payload out of the running.",
       "enum": ["pending", "in_progress", "succeeded", "rolled_back", "failed", "cancelled"]
@@ -131,6 +143,14 @@
           "msg": { "type": "string" }
         }
       }
+    },
+    "dispatch_scion": {
+      "type": "string",
+      "description": "Wake-path dispatch signal (). Set by PF's Scion-side orchestrator at the /admin/sleep -> /admin/torpor transition: the Scion short (e.g. 'dm') this still-pending payload is cleared to deploy for. The on-host dispatcher (bin/thriden-deploy-dispatch.sh) runs the wrapper only for payloads whose dispatch_scion is a Scion local to that host. Paired with dispatch_ready_at."
+    },
+    "dispatch_ready_at": {
+      "description": "Wake-path dispatch signal (). Set by PF alongside dispatch_scion at the sleep->torpor transition. The host dispatcher only acts on it while fresh (within THRIDEN_DISPATCH_STALE_AFTER_MIN); a stale signal means the torpor window passed and is skipped.",
+      "bsonType": "date"
     }
   }
 }

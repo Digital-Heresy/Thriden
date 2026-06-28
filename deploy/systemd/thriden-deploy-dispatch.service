@@ -1,0 +1,31 @@
+# Thriden wake-path deploy dispatcher (MindHive-fi46, host half of xluj).
+#
+# Oneshot run by thriden-deploy-dispatch.timer. Polls Mongo for pending,
+# dispatch-ready payloads (set by PF's Scion-side orchestrator at the
+# sleep->torpor transition) and runs the on-host wrapper for each.
+#
+# Install (operator, once per host):
+#   sudo install -m 0644 deploy/systemd/thriden-deploy-dispatch.service \
+#        deploy/systemd/thriden-deploy-dispatch.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now thriden-deploy-dispatch.timer
+#
+# Runs as the `deploy` user (owns the stack dir + sops key + docker group),
+# same identity the wrapper self-elevates to.
+[Unit]
+Description=Thriden wake-path deploy dispatcher (scheduled upgrade-at-wake)
+Documentation=file:/srv/thriden/docs/design-upgrade-at-wake.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=deploy
+Group=deploy
+WorkingDirectory=/srv/thriden
+ExecStart=/srv/thriden/bin/thriden-deploy-dispatch.sh
+Nice=10
+# The dispatcher exits 0 on "nothing to do"; exit 1 is informational -- it
+# means a wrapper exited non-zero (wrapper failure or benign claim race, either
+# way already recorded in the payload doc). Not a reason to latch a failed state.
+SuccessExitStatus=0 1
