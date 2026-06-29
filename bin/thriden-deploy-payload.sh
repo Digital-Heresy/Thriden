@@ -204,18 +204,20 @@ fi
 mongo_eval() {
   # $1 = script body. Caller exports MONGO_QUERY_* env vars before
   # invoking; we forward them into the container so the script can read
-  # via process.env.
+  # via process.env. The script itself crosses as MONGO_QUERY_JS and runs
+  # via `mongosh --eval` -- NOT piped to stdin: piping a multi-line script
+  # makes mongosh echo a `personaforge>` prompt before each printed line,
+  # which corrupts EJSON/line output the callers parse.
   local script="$1"
-  local env_flags=()
+  local env_flags=(-e "MONGO_QUERY_JS=$script")
   while IFS='=' read -r -d $'\0' line; do
     name="${line%%=*}"
-    [[ "$name" == MONGO_QUERY_* ]] && env_flags+=(-e "$line")
+    [[ "$name" == MONGO_QUERY_* && "$name" != MONGO_QUERY_JS ]] && env_flags+=(-e "$line")
   done < <(env -0)
 
   docker compose -f docker-compose.yml -f compose.prod.yml exec -T \
     "${env_flags[@]}" mongodb \
-    sh -c 'mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/personaforge?authSource=admin" --quiet' \
-    <<< "$script"
+    sh -c 'mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/personaforge?authSource=admin" --quiet --eval "$MONGO_QUERY_JS"'
 }
 
 mongo_claim_payload() {

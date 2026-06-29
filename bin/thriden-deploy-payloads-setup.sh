@@ -3,8 +3,11 @@
 # consumed by `bin/thriden-deploy-payload.sh -i <_id>` (xluj Phase 3).
 #
 # Creates (or modifies via collMod if already present) the collection with
-# a $jsonSchema validator derived from schemas/deploy-payload-mongo.schema.json.
-# Safe to re-run -- collMod replaces the validator atomically.
+# a $jsonSchema validator derived from schemas/deploy-payload-mongo.schema.json,
+# and a partial unique index enforcing "at most one PENDING payload per
+# thriden_version" (DB-side backstop for PF's schedule-writer duplicate guard).
+# Safe to re-run -- collMod replaces the validator atomically; createIndex is
+# idempotent.
 #
 # Operator runs this once per Thriden host after the stack is up, BEFORE
 # Forge starts writing payloads. PF's deploy schedule UI should refuse to
@@ -23,7 +26,7 @@ set -euo pipefail
 
 schema_file="schemas/deploy-payload-mongo.schema.json"
 
-for dep in jq docker; do
+for dep in jq docker sops; do
   if ! command -v "$dep" >/dev/null; then
     echo "ERROR: required tool '$dep' not in PATH" >&2
     exit 1
@@ -33,6 +36,16 @@ done
 if [[ ! -f "$schema_file" ]]; then
   echo "ERROR: $schema_file not found (run from repo root)" >&2
   exit 1
+fi
+
+# ── SOPS self-wrap ─────────────────────────────────────────────────────────
+# The `docker compose exec mongodb` below evaluates the compose files, which
+# require MONGO_ROOT_PASSWORD (${MONGO_ROOT_PASSWORD:?}). Re-exec under sops
+# exec-env so the operator can just run this directly (no manual `sops exec-env`
+# wrapper). Guard: on the re-exec the secret is set, so we fall through.
+stack_env="secrets/prod/stack.enc.env"
+if [[ -z "${MONGO_ROOT_PASSWORD:-}" && -f "$stack_env" ]]; then
+  exec sops exec-env "$stack_env" "$0"
 fi
 
 # Strip JSON Schema metadata keys ($schema, $id, title, description) that
@@ -71,6 +84,24 @@ if (!opts || !opts.validator || !opts.validator.$jsonSchema) {
   quit(1);
 }
 print("validator confirmed; deploy_payloads is ready for Forge to write into");
+
+// Partial unique index: at most one PENDING payload per thriden_version.
+// Hardens PF's schedule-writer duplicate guard (a soft TOCTOU: check-then-
+// insert) into a DB-enforced invariant. partialFilterExpression scopes the
+// constraint to status:"pending" so terminal states (succeeded/failed/...)
+// can freely repeat a thriden_version. Idempotent: createIndex no-ops if the
+// same index already exists. Non-fatal on failure (e.g. a collection that
+// already holds duplicate pending docs) -- the validator is the critical part.
+try {
+  db.deploy_payloads.createIndex(
+    { thriden_version: 1, status: 1 },
+    { unique: true, partialFilterExpression: { status: "pending" }, name: "uniq_pending_thriden_version" }
+  );
+  print("partial unique index uniq_pending_thriden_version ensured");
+} catch (e) {
+  print("WARNING: could not create uniq_pending_thriden_version index: " + e.message);
+  print("  resolve duplicate pending payloads (cancel all but one), then re-run this script");
+}
 JS
 
 echo "[setup] applying validator from $schema_file to personaforge.deploy_payloads"

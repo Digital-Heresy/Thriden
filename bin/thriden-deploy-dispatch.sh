@@ -40,9 +40,20 @@ STALE_AFTER_MIN="${THRIDEN_DISPATCH_STALE_AFTER_MIN:-120}"
 
 cd "$STACK_DIR"
 
-for dep in docker jq; do
+for dep in docker jq sops; do
   command -v "$dep" >/dev/null || { echo "ERROR: '$dep' not in PATH" >&2; exit 1; }
 done
+
+# ── SOPS self-wrap ─────────────────────────────────────────────────────────
+# The mongosh-in-container query below runs `docker compose exec mongodb`, which
+# evaluates the compose files — and docker-compose.yml requires MONGO_ROOT_PASSWORD
+# (${MONGO_ROOT_PASSWORD:?}). The systemd timer runs this bare (no decrypted
+# secrets in the env), so re-exec under sops exec-env to supply the stack tier.
+# Guard: on the re-exec MONGO_ROOT_PASSWORD is set, so we fall through (no loop).
+STACK_ENV="secrets/prod/stack.enc.env"
+if [[ -z "${MONGO_ROOT_PASSWORD:-}" && -f "$STACK_ENV" ]]; then
+  exec sops exec-env "$STACK_ENV" "$0"
+fi
 
 # ── Single-instance lock (deploy-writable) ─────────────────────────────────
 lock="${TMPDIR:-/tmp}/thriden-deploy-dispatch.lock"
@@ -67,14 +78,12 @@ if [[ ${#local_scions[@]} -eq 0 ]]; then
 fi
 
 # ── Query Mongo for pending, dispatch-ready payloads for local Scions ──────
-# Reuses the executor's mongosh-in-container pattern (5hxi injection-safety:
-# the scion list crosses as a JSON env var, never embedded in JS source).
+# 5hxi injection-safety: the scion list + the script itself cross as env vars,
+# never embedded in JS source. The script runs via `mongosh --eval` (NOT piped
+# to stdin) -- piping a multi-line script makes mongosh echo a `personaforge>`
+# prompt before each printed line, which corrupts the parsed output.
 scions_json=$(printf '%s\n' "${local_scions[@]}" | jq -R . | jq -cs .)
-ready=$("${BASE_COMPOSE[@]}" exec -T \
-  -e MONGO_QUERY_SCIONS="$scions_json" \
-  -e MONGO_QUERY_STALE_MIN="$STALE_AFTER_MIN" \
-  mongodb \
-  sh -c 'mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/personaforge?authSource=admin" --quiet' <<'JS'
+read -r -d '' dispatch_js <<'JS' || true
 const scions = JSON.parse(process.env.MONGO_QUERY_SCIONS);
 const staleMin = parseInt(process.env.MONGO_QUERY_STALE_MIN, 10);
 const cutoff = new Date(Date.now() - staleMin * 60 * 1000);
@@ -86,7 +95,12 @@ const docs = db.deploy_payloads.find({
 // One line per dispatchable payload: "<_id> <dispatch_scion>"
 for (const d of docs) { print(`${d._id.toString()} ${d.dispatch_scion}`); }
 JS
-)
+ready=$("${BASE_COMPOSE[@]}" exec -T \
+  -e MONGO_QUERY_SCIONS="$scions_json" \
+  -e MONGO_QUERY_STALE_MIN="$STALE_AFTER_MIN" \
+  -e MONGO_QUERY_JS="$dispatch_js" \
+  mongodb \
+  sh -c 'mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/personaforge?authSource=admin" --quiet --eval "$MONGO_QUERY_JS"')
 
 if [[ -z "${ready//[$'\n\r\t ']/}" ]]; then
   echo "[dispatch] no pending dispatch-ready payloads for local scions (${local_scions[*]})" >&2
