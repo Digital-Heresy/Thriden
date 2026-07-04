@@ -113,4 +113,19 @@ docker compose -f docker-compose.yml -f compose.prod.yml exec -T \
   sh -c 'mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/personaforge?authSource=admin" --quiet' \
   <<< "$MONGO_SCRIPT"
 
+# ── Pin the host short name (host-short resolution, xluj integration bug #3) ──
+# Unattended paths (the wake-path dispatcher -> wrapper) can't pass -h, so pin
+# the secrets-bundle name once per host. The lib's fallback chain resolves a
+# single-host install unaided, but an explicit pin survives a second host dir
+# appearing in the secrets tree.
+# shellcheck source=bin/thriden-host-short.lib.sh
+. "$(dirname "$0")/thriden-host-short.lib.sh"
+if [[ ! -s .thriden-host-short ]]; then
+  pinned_host_short="$(thriden_resolve_host_short)"
+  printf '%s\n' "$pinned_host_short" > .thriden-host-short
+  echo "[setup] pinned host short name '$pinned_host_short' -> .thriden-host-short"
+else
+  echo "[setup] host short pin already present: $(tr -d '[:space:]' < .thriden-host-short)"
+fi
+
 echo "[setup] done"

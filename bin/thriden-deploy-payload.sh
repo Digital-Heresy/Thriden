@@ -143,9 +143,9 @@ for dep in "${required_deps[@]}"; do
   fi
 done
 
-if [[ -z "$host_short" ]]; then
-  host_short="$(hostname -s)"
-fi
+# shellcheck source=bin/thriden-host-short.lib.sh
+. "$(dirname "$0")/thriden-host-short.lib.sh"
+host_short="$(thriden_resolve_host_short "$host_short")"
 
 host_env="secrets/prod/hosts/${host_short}/host.enc.env"
 stack_env="secrets/prod/stack.enc.env"

@@ -45,9 +45,10 @@ stack_env="secrets/prod/stack.enc.env"
 # still in stack.enc.env wins (sops exec-env layers it on top in the resolve).
 [ -f deploy/versions.env ] && { set -a; . ./deploy/versions.env; set +a; }
 
-# Host short for the GHCR pull credential (single dir under hosts/).
-host_short="${THRIDEN_HOST_SHORT:-}"
-[ -n "$host_short" ] || host_short="$(ls secrets/prod/hosts/ 2>/dev/null | head -n1)"
+# Host short for the GHCR pull credential (shared resolution chain).
+# shellcheck source=bin/thriden-host-short.lib.sh
+. "$(dirname "$0")/thriden-host-short.lib.sh"
+host_short="$(thriden_resolve_host_short)"
 host_env="secrets/prod/hosts/${host_short}/host.enc.env"
 if [ ! -f "$host_env" ]; then
   echo "ERROR: $host_env not found (GHCR pull credential)." >&2

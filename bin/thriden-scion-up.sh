@@ -131,16 +131,11 @@ fi
 # bring-up has to fetch it — and `docker compose up` can't auth to GHCR on its
 # own (it'd fail "unauthorized"). thriden-compose-pull.sh holds the narrow
 # docker-login -> pull -> logout credential window; adding the per-Scion -f so
-# it resolves engram-<short> / forge-<short>. Host short = the single dir under
-# secrets/prod/hosts/ (override with THRIDEN_HOST_SHORT for multi-host).
-host_short="${THRIDEN_HOST_SHORT:-}"
-if [ -z "$host_short" ]; then
-  host_short="$(ls secrets/prod/hosts/ 2>/dev/null | head -n1)"
-fi
-pull_args=(-f docker-compose.yml -f compose.prod.yml -f "$file")
-[ -n "$host_short" ] && pull_args=(-h "$host_short" "${pull_args[@]}")
-echo ">> pulling images from GHCR (host=${host_short:-auto}) ..." >&2
-bin/thriden-compose-pull.sh "${pull_args[@]}"
+# it resolves engram-<short> / forge-<short>. Host-short resolution lives
+# inside compose-pull (bin/thriden-host-short.lib.sh; THRIDEN_HOST_SHORT still
+# honored via that chain).
+echo ">> pulling images from GHCR ..." >&2
+bin/thriden-compose-pull.sh -f docker-compose.yml -f compose.prod.yml -f "$file"
 
 echo ">> bringing up engram-$short + forge-$short ..." >&2
 sops exec-env "$SECRETS" \

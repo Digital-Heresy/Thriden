@@ -96,10 +96,10 @@ if sops -d "$STACK_ENV" 2>/dev/null \
 fi
 
 # ── 5. Substrate: pull + recreate forge-web / nooscope ───────────────────────
-host_short="${THRIDEN_HOST_SHORT:-}"
-[ -n "$host_short" ] || host_short="$(ls secrets/prod/hosts/ 2>/dev/null | head -n1)"
-echo ">> pulling substrate images (host=${host_short:-auto}) ..." >&2
-bin/thriden-compose-pull.sh ${host_short:+-h "$host_short"}
+# Host-short resolution lives inside compose-pull now (bin/thriden-host-short.lib.sh);
+# THRIDEN_HOST_SHORT is still honored via that chain.
+echo ">> pulling substrate images ..." >&2
+bin/thriden-compose-pull.sh
 echo ">> recreating substrate (forge-web, nooscope) ..." >&2
 # This file set is base+prod only — the per-Scion forge-<short>/engram-<short>
 # drop-ins are recreated separately below, so compose would flag them as
