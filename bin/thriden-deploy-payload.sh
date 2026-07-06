@@ -22,6 +22,20 @@
 #   - Engram-side operations (backup, import, torpor) are skipped with
 #     a log entry if no engram-* services are running. This lets pi5-
 #     smoke exercise the script with just forge-web/nooscope.
+#   - Git self-sync to thriden_version (): -i (Mongo) mode
+#     always checks out the payload's release tag before the claim (pre-claim
+#     read → checkout → guarded re-exec); -m (file) mode does the same on
+#     opt-in via -S. Lets a structural release deploy from one Forge
+#     "schedule" click with no manual pre-pull. Leaves HEAD detached at the
+#     tag; bin/thriden-upgrade.sh re-attaches to main before its next pull.
+#   - Per-Scion drop-in support (2026-07-03, xluj integration bugs #4/#5):
+#     compose-<short>.yml drop-ins join the compose file set for
+#     discovery/ps/exec, so Scion brains are visible to backup/smoke/torpor;
+#     Scion services are RECREATED via bin/thriden-scion-up.sh (re-fetches
+#     the Mongo soul binding), never raw `up -d`. The wrapper self-wraps
+#     under `sops exec-env` (stack tier) so bare manual file-mode runs see
+#     the same env the dispatcher provides. The `forge` component pins both
+#     FORGE_VERSION (substrate) and FORGE_RUNTIME_VERSION (Scion runtimes).
 #
 # The 5hxi injection-safety convention applies: nothing from the
 # manifest or CLI args is interpolated into a `sh -c` command string.
@@ -70,26 +84,116 @@ if [[ -n "$manifest" && ! -f "$manifest" ]]; then
   exit 1
 fi
 
-# ── Optional git self-sync (-S) ────────────────────────────────────────
+# ── Git self-sync to the manifest's thriden_version () ─────
 #
-# Bring the stack tree to the manifest's `thriden_version` BEFORE deploying,
+# Bring the stack tree to the payload's `thriden_version` BEFORE deploying,
 # so a release that changes compose *structure* (new service / env var /
 # per-Scion compose / bin script) rides a single Forge "schedule" click
-# instead of needing a manual `git pull` first ().
+# instead of needing a manual `git pull` first.
 #
-# File mode only, on purpose:
-#   - there is no Mongo claim to order against, and thriden_version is
-#     readable up front (in -i mode the claim happens later, and checking
-#     out mid-claim would risk a double-claim);
-#   - the checkout rewrites this very script + the compose files under the
-#     running process, so we re-exec the now-current version (guarded) to
-#     run the rest of the lifecycle from the checked-out release, not the
-#     bytes bash half-read before the checkout.
-# The direct -i (Mongo) sync is the host-side wake harness's job
-# (checkout-then-invoke) -- see .
+# Two entry points call git_sync_to_tag + re-exec, both guarded by
+# THRIDEN_PAYLOAD_SYNCED so the sync runs exactly once:
+#   - File mode (-S, below): thriden_version comes from the manifest file,
+#     which is readable with zero machinery, so we sync early (before the
+#     sops self-wrap). Opt-in — a dev may want to test a manifest against
+#     the current tree without a checkout.
+#   - Mongo mode (-i): the wake/production path ALWAYS self-syncs. The
+#     target lives in Mongo, so the sync waits until after the sops
+#     self-wrap + compose-file set are up (it needs mongosh in the mongodb
+#     container), and runs BEFORE the atomic pending→in_progress claim so
+#     the pre-claim read can't double-claim and a checkout failure leaves
+#     the doc reclaimable (see the -i materialisation block below).
+# Either way the checkout rewrites this very script + the compose files
+# under the running process, so we `exec` the now-current version rather
+# than letting bash read the rest of the lifecycle from bytes that no
+# longer exist. Set THRIDEN_PAYLOAD_SYNCED=1 in the env to bypass entirely.
+
+# git_sync_to_tag <tag>: no-op if already exactly at <tag>, else refuse a
+# dirty tree, fetch, verify the tag exists, and checkout (detached HEAD at
+# the release). Returns non-zero (with a reason on stderr) on any failure;
+# callers abort before mutating deploy state, so a bail is always safe.
+git_sync_to_tag() {
+  local target="$1"
+  [[ "$(git describe --tags --exact-match HEAD 2>/dev/null || true)" == "$target" ]] && return 0
+  # A deploy host must be pristine -- refuse rather than clobber local work.
+  if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "ERROR: refusing to checkout '$target' over a dirty tree; resolve local changes first" >&2
+    return 1
+  fi
+  echo "[sync] fetching tags + checking out $target" >&2
+  if ! git fetch --tags --quiet; then
+    echo "ERROR: git fetch failed; refusing to deploy a possibly-stale tree" >&2
+    return 1
+  fi
+  if ! git rev-parse -q --verify "refs/tags/${target}^{commit}" >/dev/null; then
+    echo "ERROR: target tag '$target' not found after fetch" >&2
+    return 1
+  fi
+  if ! git checkout --quiet "$target"; then
+    echo "ERROR: checkout of '$target' failed" >&2
+    return 1
+  fi
+  return 0
+}
+
+# ── min_upgrade_from guardrail () ─────────────────────────
+#
+# A payload MAY carry `min_upgrade_from` (a thriden-v* tag). Bundles are fully
+# encapsulated (exact image pins, no deltas) so any forward jump is
+# *installable*, but persisted state (engram WAL/snapshots, PF Mongo docs)
+# makes "upgrade from anywhere" a convention, not an enforced contract —
+# migrations are release-note warnings + schema_version stamps, and the
+# validation gate has only ever exercised single-version (X→X+1) hops. When a
+# release truly needs stepping through an intermediate version, it sets
+# min_upgrade_from; the wrapper then REFUSES rather than perform the untested
+# skip-hop that could corrupt a brain. The contract is MindHive-owned (this
+# check + the schema field); PF writes the value into the payload.
+#
+# "Current umbrella version" = the tree's nearest thriden-v* tag, captured
+# ONCE before any cry2 checkout moves the tree to the target (exported so it
+# survives the sops-wrap and self-sync re-execs). Only thriden-v* tags count —
+# the repo also carries engram `v*` tags, which must not be mistaken for the
+# umbrella version.
+export THRIDEN_RUN_FROM="${THRIDEN_RUN_FROM:-$(git describe --tags --abbrev=0 --match 'thriden-v*' 2>/dev/null || true)}"
+
+# version_lt <a> <b>: true (0) iff a < b, comparing the X.Y.Z after an optional
+# thriden-v prefix (semver order via sort -V).
+version_lt() {
+  local a="${1#thriden-v}" b="${2#thriden-v}"
+  [[ "$a" == "$b" ]] && return 1
+  [[ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n1)" == "$a" ]]
+}
+
+# enforce_min_upgrade_from <min>: return non-zero (with a reason on stderr) if
+# the host's current umbrella version is below <min>. Empty <min> => no floor
+# set, allow. Unknown current version => warn + allow (don't block a legit
+# deploy on an underivable tag; the release notes + schema_version stamps are
+# the backstop). Callers abort before mutating deploy state.
+enforce_min_upgrade_from() {
+  local min="$1" from="${THRIDEN_RUN_FROM:-}"
+  [[ -z "$min" ]] && return 0
+  if [[ -z "$from" ]]; then
+    echo "WARN: min_upgrade_from=$min set but the host's current umbrella version is unknown (no thriden-v* tag on the tree); allowing the deploy" >&2
+    return 0
+  fi
+  if version_lt "$from" "$min"; then
+    echo "ERROR: refusing deploy — host is on $from but this release sets min_upgrade_from=$min. Persisted-state migrations only cover single-version steps; upgrade through the intermediate release(s) first." >&2
+    return 1
+  fi
+  return 0
+}
+
+# File mode: enforce the floor up front (before the sops-wrap / any -S
+# checkout / any swap). Cheap; re-passes harmlessly on the -S re-exec. In -i
+# mode $manifest is still empty here — that path enforces in its own pre-claim
+# sync block below, so a refusal surfaces via 7mwy's dispatch_error.
+if [[ -n "$manifest" ]] && command -v jq >/dev/null; then
+  enforce_min_upgrade_from "$(jq -r '.min_upgrade_from // empty' "$manifest")" || exit 1
+fi
+
 if [[ "$do_sync" == 1 && -z "${THRIDEN_PAYLOAD_SYNCED:-}" ]]; then
   if [[ -n "$mongo_id" ]]; then
-    echo "ERROR: -S (git self-sync) requires file mode (-m); for -i the wake harness must checkout before invoking" >&2
+    echo "ERROR: -S is redundant with -i (Mongo mode self-syncs unconditionally); drop it" >&2
     exit 2
   fi
   for t in git jq; do
@@ -103,27 +207,7 @@ if [[ "$do_sync" == 1 && -z "${THRIDEN_PAYLOAD_SYNCED:-}" ]]; then
     echo "ERROR: -S given but manifest carries no thriden_version to sync to" >&2
     exit 2
   fi
-  # No-op fast path: already exactly at the target tag.
-  if [[ "$(git describe --tags --exact-match HEAD 2>/dev/null || true)" != "$sync_target" ]]; then
-    # A deploy host must be pristine -- refuse rather than clobber local work.
-    if ! git diff --quiet || ! git diff --cached --quiet; then
-      echo "ERROR: -S refusing to checkout over a dirty tree; resolve local changes first" >&2
-      exit 1
-    fi
-    echo "[sync] fetching tags + checking out $sync_target" >&2
-    if ! git fetch --tags --quiet; then
-      echo "ERROR: -S git fetch failed; refusing to deploy a possibly-stale tree" >&2
-      exit 1
-    fi
-    if ! git rev-parse -q --verify "refs/tags/${sync_target}^{commit}" >/dev/null; then
-      echo "ERROR: -S target tag '$sync_target' not found after fetch" >&2
-      exit 1
-    fi
-    if ! git checkout --quiet "$sync_target"; then
-      echo "ERROR: -S checkout of '$sync_target' failed" >&2
-      exit 1
-    fi
-  fi
+  git_sync_to_tag "$sync_target" || exit 1
   # Re-exec the (now-current) script; guard prevents a sync loop.
   export THRIDEN_PAYLOAD_SYNCED=1
   exec "$0" "$@"
@@ -156,6 +240,50 @@ for f in "$host_env" "$stack_env"; do
     exit 1
   fi
 done
+
+# ── SOPS self-wrap (matches dispatcher/setup) ──────────────────────────
+# Every docker compose call below evaluates the compose graph, which needs
+# stack-tier vars (${MONGO_ROOT_PASSWORD:?} in docker-compose.yml). A manual
+# file-mode run invoked bare would otherwise see EMPTY service discovery —
+# the `ps --services 2>/dev/null` calls swallow the interpolation error and
+# the wrapper refuses with "match no running compose services" (xluj
+# integration bug #4, hit on the first Cairn brain-swap attempt). The
+# dispatcher path never noticed: it self-wraps before invoking us. Re-exec
+# under sops exec-env; the guard falls through on the re-exec. Args here are
+# simple tokens (ObjectIds, paths, shorts), safe for %q re-quoting into the
+# single command string sops exec-env expects.
+if [[ -z "${MONGO_ROOT_PASSWORD:-}" ]]; then
+  exec sops exec-env "$stack_env" "$(printf '%q ' "$0" "$@")"
+fi
+
+# ── Compose file set: base + prod + per-Scion drop-ins ─────────────────
+# Per-Scion services (engram-<short>/forge-<short>) live in compose-<short>.yml
+# drop-ins and are invisible to a base+prod-only file set (xluj integration
+# gap #5: the wrapper could never discover, smoke, back up, or torpor a Scion
+# brain — every prior validation ran against substrate services only). The
+# drop-ins join the file set for discovery/exec/ps; RECREATION of Scion
+# services is delegated to bin/thriden-scion-up.sh (which re-fetches the
+# soul/raven binding from Mongo) — a raw `up -d` would boot them UNBOUND and
+# trip the Scion-death guard on the next boot.
+compose_files=(-f docker-compose.yml -f compose.prod.yml)
+scion_shorts=()
+shopt -s nullglob
+for _f in compose-*.yml; do
+  compose_files+=(-f "$_f")
+  _s="${_f#compose-}"
+  scion_shorts+=("${_s%.yml}")
+done
+shopt -u nullglob
+compose_files_q="${compose_files[*]@Q}"
+proj="${COMPOSE_PROJECT_NAME:-$(basename "$PWD")}"
+
+is_scion_service() {
+  local svc="$1" s
+  for s in "${scion_shorts[@]}"; do
+    [[ "$svc" == "engram-$s" || "$svc" == "forge-$s" ]] && return 0
+  done
+  return 1
+}
 
 # Mongo mode: payload manifest lives in Mongo (set by Forge). Fetch + claim
 # atomically, materialise to a temp file for the rest of the wrapper to use,
@@ -215,9 +343,33 @@ mongo_eval() {
     [[ "$name" == MONGO_QUERY_* && "$name" != MONGO_QUERY_JS ]] && env_flags+=(-e "$line")
   done < <(env -0)
 
-  docker compose -f docker-compose.yml -f compose.prod.yml exec -T \
+  docker compose "${compose_files[@]}" exec -T \
     "${env_flags[@]}" mongodb \
     sh -c 'mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/personaforge?authSource=admin" --quiet --eval "$MONGO_QUERY_JS"'
+}
+
+mongo_read_thriden_version() {
+  # Pure read (no status filter, no mutation) so it works on a still-pending
+  # doc and CANNOT claim it — this runs before the atomic claim during the
+  # -i self-sync (). Prints the bare thriden_version, or empty.
+  mongo_eval "$(cat <<'JS'
+const _id = process.env.MONGO_QUERY_PAYLOAD_ID;
+const doc = db.deploy_payloads.findOne({_id: new ObjectId(_id)}, {thriden_version: 1});
+print(doc && doc.thriden_version ? doc.thriden_version : "");
+JS
+)"
+}
+
+mongo_read_min_upgrade_from() {
+  # Pure read (same pre-claim contract as mongo_read_thriden_version) for the
+  # optional min_upgrade_from floor (). Prints the bare value, or
+  # empty when the payload sets no floor.
+  mongo_eval "$(cat <<'JS'
+const _id = process.env.MONGO_QUERY_PAYLOAD_ID;
+const doc = db.deploy_payloads.findOne({_id: new ObjectId(_id)}, {min_upgrade_from: 1});
+print(doc && doc.min_upgrade_from ? doc.min_upgrade_from : "");
+JS
+)"
 }
 
 mongo_claim_payload() {
@@ -283,6 +435,40 @@ JS
 # ── Manifest materialisation ───────────────────────────────────────────
 
 if [[ -n "$mongo_id" ]]; then
+  # Self-sync the tree to the payload's thriden_version BEFORE the claim
+  # (). We're now past the sops self-wrap + compose-file set,
+  # so mongosh is reachable; the read is non-mutating (mongo_read_thriden_version
+  # uses findOne, no status filter) so it can't claim the doc. On checkout
+  # failure we exit before the atomic claim, leaving the doc pending and
+  # reclaimable next window. The checkout rewrites this script under us, so
+  # re-exec (guarded) to run the lifecycle — including the claim — from the
+  # release's own bytes. THRIDEN_PAYLOAD_SYNCED=1 bypasses (dev/test) — note
+  # this also skips the min_upgrade_from floor below, since the check lives in
+  # this pre-claim block. Production never presets it (the dispatcher invokes
+  # -i bare; the floor runs on the first pass before the wrapper self-sets it
+  # on re-exec), so only a manual override loses the floor.
+  if [[ -z "${THRIDEN_PAYLOAD_SYNCED:-}" ]]; then
+    if ! command -v git >/dev/null; then
+      echo "ERROR: -i self-sync needs 'git' in PATH" >&2
+      exit 1
+    fi
+    export MONGO_QUERY_PAYLOAD_ID="$mongo_id"
+    sync_target=$(mongo_read_thriden_version | tr -d '[:space:]')
+    if [[ -z "$sync_target" ]]; then
+      echo "ERROR: payload $mongo_id carries no thriden_version to sync to (doc left pending, reclaimable)" >&2
+      exit 1
+    fi
+    # min_upgrade_from floor (), pre-claim + pre-checkout: refuse a
+    # skip-hop BEFORE claiming or moving the tree. A non-zero exit here leaves
+    # the doc pending, so the dispatcher stamps dispatch_error ()
+    # and the operator sees why the scheduled upgrade won't start.
+    enforce_min_upgrade_from "$(mongo_read_min_upgrade_from | tr -d '[:space:]')" \
+      || { echo "ERROR: payload $mongo_id refused by min_upgrade_from floor; doc left pending" >&2; exit 1; }
+    git_sync_to_tag "$sync_target" || { echo "ERROR: self-sync failed; payload $mongo_id left pending, reclaimable" >&2; exit 1; }
+    export THRIDEN_PAYLOAD_SYNCED=1
+    exec "$0" "$@"
+  fi
+
   # Fetch + claim from Mongo. Write the input-shape subdoc out to a temp
   # file so the rest of the wrapper (which expects $manifest to be a JSON
   # file path) works unchanged.
@@ -410,21 +596,26 @@ done
 
 log info "components in order: ${components[*]}"
 
-# Map logical component → compose env var
-env_var_for() {
+# Map logical component → compose env var(s), one per line. `forge` pins BOTH
+# the substrate (forge-web, FORGE_VERSION) and the Scion runtimes
+# (forge-<short>, FORGE_RUNTIME_VERSION): the manifest is authoritative for a
+# scheduled deploy, and pinning only the substrate var would leave runtimes on
+# whatever the tree's deploy/versions.env happens to say (the thriden-v0.9.0
+# recipe-skew class of bug).
+env_vars_for() {
   case "$1" in
     engram)   echo ENGRAM_VERSION ;;
-    forge)    echo FORGE_VERSION ;;
+    forge)    printf '%s\n' FORGE_VERSION FORGE_RUNTIME_VERSION ;;
     nooscope) echo NOOSCOPE_VERSION ;;
-    *) echo ""; return 1 ;;
+    *) return 1 ;;
   esac
 }
 
 # Map logical component → compose service names (glob expanded later)
 compose_services_for() {
   case "$1" in
-    engram)   docker compose -f docker-compose.yml -f compose.prod.yml ps --services 2>/dev/null | grep -E '^engram(-.+)?$' || true ;;
-    forge)    docker compose -f docker-compose.yml -f compose.prod.yml ps --services 2>/dev/null | grep -E '^forge(-.+)?$' || true ;;
+    engram)   docker compose "${compose_files[@]}" ps --services 2>/dev/null | grep -E '^engram(-.+)?$' || true ;;
+    forge)    docker compose "${compose_files[@]}" ps --services 2>/dev/null | grep -E '^forge(-.+)?$' || true ;;
     nooscope) echo nooscope ;;
   esac
 }
@@ -450,7 +641,7 @@ else
   # deployable: false (long consolidation, mid-cycle work). See
   # docs/design-upgrade-at-wake.md "Sleep-cycle alignment".
   for svc in "${engram_services[@]}"; do
-    health_json=$(docker compose -f docker-compose.yml -f compose.prod.yml exec -T "$svc" \
+    health_json=$(docker compose "${compose_files[@]}" exec -T "$svc" \
       sh -c 'curl -fsS http://localhost:3030/health' 2>/dev/null || echo '{}')
     deployable=$(echo "$health_json" | jq -r '.deployable // "unknown"')
     if [[ "$deployable" == "false" ]]; then
@@ -497,7 +688,7 @@ else
     # /admin/export needs ENGRAM_RAVEN_TOKEN. Pull it from the
     # container's own env via docker exec, so we don't need to thread
     # secrets through the wrapper.
-    if docker compose -f docker-compose.yml -f compose.prod.yml exec -T "$svc" \
+    if docker compose "${compose_files[@]}" exec -T "$svc" \
          sh -c 'curl -fsS -H "Authorization: Bearer $ENGRAM_RAVEN_TOKEN" http://localhost:3030/admin/export' \
          > "$out" 2>/dev/null; then
       backup_path[$scion]="$out"
@@ -519,66 +710,145 @@ fi
 
 # ── Pin step: sops set per component ───────────────────────────────────
 
-declare -A original_tag
-log info "capturing original env values before pin"
+# Collect the compose service names we'll be operating on FIRST — the
+# running-tag revert capture below needs to know which containers represent
+# each env var. Split by class: substrate services go through `up -d`;
+# Scion services (engram-<short> / forge-<short> from a drop-in) go through
+# scion-up, which re-fetches the soul binding before recreate.
+swap_services=()
+scion_swap_shorts=()
 for c in "${components[@]}"; do
-  var=$(env_var_for "$c") || { log error "no env var mapping for component '$c'"; finalize failed; exit 1; }
-  # Decrypt to inspect current value (in-memory only via process substitution)
-  original_tag[$c]=$(sops -d --extract "[\"$var\"]" --output-type dotenv "$stack_env" 2>/dev/null \
-    | grep "^${var}=" | cut -d= -f2- || echo "")
-  log info "  $c: $var=${original_tag[$c]:-<unset>} → ${new_tag[$c]}"
+  while IFS= read -r s; do
+    [[ -n "$s" ]] || continue
+    if is_scion_service "$s"; then
+      short="${s#engram-}"
+      short="${short#forge-}"
+      case " ${scion_swap_shorts[*]-} " in
+        *" $short "*) ;;
+        *) scion_swap_shorts+=("$short") ;;
+      esac
+    else
+      case " ${swap_services[*]-} " in
+        *" $s "*) ;;
+        *) swap_services+=("$s") ;;
+      esac
+    fi
+  done < <(compose_services_for "$c")
+done
+
+# Runs pre-pin now, so a refusal needs no revert.
+if [[ ${#swap_services[@]} -eq 0 && ${#scion_swap_shorts[@]} -eq 0 ]]; then
+  log error "manifest components [${components[*]}] match no running compose services on this host"
+  log error "refusing to proceed -- without an explicit swap target list, 'docker compose up -d' would recreate every service in the stack"
+  log error "check that the expected services (e.g. engram-<short>, forge-<short>) are running, or correct the manifest"
+  set_result_field '.failure_kind' '"wrapper_error"'
+  finalize failed
+  exit 1
+fi
+
+# Map env var → the running container that carries its CURRENT tag. This is
+# the TRUE revert target (): on a post-tpo4 host the env
+# override is usually unset, and by the time the wrapper runs the tree's
+# deploy/versions.env already carries the NEW release — so "revert to the
+# pre-pin env value" would materially re-deploy the new version. What the
+# host was actually running is the only honest rollback destination.
+running_tag_for_var() {
+  local var="$1" cname="" s img
+  case "$var" in
+    ENGRAM_VERSION)
+      for s in "${scion_swap_shorts[@]}"; do
+        if docker inspect "${proj}-engram-${s}-1" >/dev/null 2>&1; then
+          cname="${proj}-engram-${s}-1"; break
+        fi
+      done ;;
+    FORGE_RUNTIME_VERSION)
+      for s in "${scion_swap_shorts[@]}"; do
+        if docker inspect "${proj}-forge-${s}-1" >/dev/null 2>&1; then
+          cname="${proj}-forge-${s}-1"; break
+        fi
+      done ;;
+    FORGE_VERSION)    cname="${proj}-forge-web-1" ;;
+    NOOSCOPE_VERSION) cname="${proj}-nooscope-1" ;;
+  esac
+  [[ -n "$cname" ]] || return 0
+  img=$(docker inspect "$cname" --format '{{.Config.Image}}' 2>/dev/null) || return 0
+  [[ "$img" == *:* ]] || return 0
+  printf '%s' "${img##*:}"
+}
+
+declare -A original_tag   # keyed by env var name; EFFECTIVE original: the
+                          # pre-pin env override if set, else the running
+                          # container's image tag (2wg6 true-revert target)
+declare -A original_src   # env | running | none — for honest logging
+declare -A pin_tag
+pin_vars=()
+log info "capturing revert targets before pin (env override, else running-container tag)"
+for c in "${components[@]}"; do
+  vars=$(env_vars_for "$c") || { log error "no env var mapping for component '$c'"; finalize failed; exit 1; }
+  while IFS= read -r var; do
+    [[ -n "$var" ]] || continue
+    pin_vars+=("$var")
+    pin_tag[$var]="${new_tag[$c]}"
+    # Decrypt to inspect current value (in-memory only via process substitution)
+    original_tag[$var]=$(sops -d --extract "[\"$var\"]" --output-type dotenv "$stack_env" 2>/dev/null \
+      | grep "^${var}=" | cut -d= -f2- || echo "")
+    if [[ -n "${original_tag[$var]}" ]]; then
+      original_src[$var]="env"
+    else
+      original_tag[$var]="$(running_tag_for_var "$var")"
+      if [[ -n "${original_tag[$var]}" ]]; then
+        original_src[$var]="running"
+      else
+        original_src[$var]="none"
+      fi
+    fi
+    log info "  $c: $var=${original_tag[$var]:-<none>} (${original_src[$var]}) → ${new_tag[$c]}"
+  done <<< "$vars"
 done
 
 # Save originals into result file so a re-run knows what to revert to
-originals_json=$(printf '%s\n' "${!original_tag[@]}" | jq -R . | jq -s 'reduce .[] as $k ({}; .)')
-for c in "${!original_tag[@]}"; do
-  originals_json=$(echo "$originals_json" | jq --arg k "$c" --arg v "${original_tag[$c]}" '. + {($k): $v}')
+originals_json='{}'
+for var in "${pin_vars[@]}"; do
+  originals_json=$(echo "$originals_json" | jq --arg k "$var" --arg v "${original_tag[$var]}" '. + {($k): $v}')
 done
 set_result_field '.original_tags' "$originals_json"
 
 log info "pinning new tags via sops set"
-for c in "${components[@]}"; do
-  var=$(env_var_for "$c")
-  tag="${new_tag[$c]}"
-  sops set "$stack_env" "[\"$var\"]" "\"$tag\""
-  log info "  pinned $var=$tag"
+for var in "${pin_vars[@]}"; do
+  sops set "$stack_env" "[\"$var\"]" "\"${pin_tag[$var]}\""
+  log info "  pinned $var=${pin_tag[$var]}"
 done
 
 # ── Swap ───────────────────────────────────────────────────────────────
 
 revert_pins() {
   log info "reverting tag pins"
-  for c in "${components[@]}"; do
-    var=$(env_var_for "$c")
-    orig="${original_tag[$c]}"
-    if [[ -n "$orig" ]]; then
-      sops set "$stack_env" "[\"$var\"]" "\"$orig\""
-      log info "  restored $var=$orig"
-    else
-      log warn "  $var had no original value; leaving pinned (manual review recommended)"
-    fi
+  local var orig
+  for var in "${pin_vars[@]}"; do
+    orig="${original_tag[$var]}"
+    case "${original_src[$var]}" in
+      env)
+        sops set "$stack_env" "[\"$var\"]" "\"$orig\""
+        log info "  restored $var=$orig (pre-deploy override)"
+        ;;
+      running)
+        sops set "$stack_env" "[\"$var\"]" "\"$orig\""
+        log info "  pinned $var=$orig (running-container revert target; DELIBERATE shadow over deploy/versions.env — this host is intentionally NOT on the release the tree carries; clears on the next successful upgrade)"
+        ;;
+      *)
+        if sops unset "$stack_env" "[\"$var\"]" >/dev/null 2>&1; then
+          log info "  removed $var pin (no revert target known; deploy/versions.env resumes ownership)"
+        else
+          log warn "  $var had no revert target and sops unset failed/unavailable; leaving pinned (manual review recommended)"
+        fi
+        ;;
+    esac
   done
 }
 
-# Collect all compose service names we'll be operating on
-swap_services=()
-for c in "${components[@]}"; do
-  while IFS= read -r s; do [[ -n "$s" ]] && swap_services+=("$s"); done < <(compose_services_for "$c")
-done
-
-if [[ ${#swap_services[@]} -eq 0 ]]; then
-  log error "manifest components [${components[*]}] match no running compose services on this host"
-  log error "refusing to proceed -- without an explicit swap target list, 'docker compose up -d' would recreate every service in the stack"
-  log error "check that the expected services (e.g. engram-<short>, forge-<short>) are running, or correct the manifest"
-  revert_pins
-  set_result_field '.failure_kind' '"wrapper_error"'
-  finalize failed
-  exit 1
-fi
-
-log info "swap targets: ${swap_services[*]}"
+log info "swap targets: substrate=[${swap_services[*]-}] scions=[${scion_swap_shorts[*]-}]"
 log info "pulling new images via bin/thriden-compose-pull.sh"
-if ! ./bin/thriden-compose-pull.sh -h "$host_short" 2>&1 | tee -a /tmp/thriden-pull-$run_id.log >&2; then
+if ! ./bin/thriden-compose-pull.sh -h "$host_short" "${compose_files[@]}" 2>&1 | tee -a /tmp/thriden-pull-$run_id.log >&2; then
   log error "compose pull failed; reverting pins"
   revert_pins
   set_result_field '.failure_kind' '"wrapper_error"'
@@ -590,11 +860,55 @@ log info "recreating swap targets with new images"
 # Compose up needs stack.enc.env loaded for var interpolation. We don't
 # need host.enc.env here (no GHCR pull happens — images already local
 # from the prior thriden-compose-pull step).
-if ! sops exec-env "$stack_env" "docker compose -f docker-compose.yml -f compose.prod.yml up -d ${swap_services[*]@Q}" 2>&1 | tee -a /tmp/thriden-up-$run_id.log >&2; then
-  log error "compose up failed; reverting pins + recreating originals"
+recreate_scions() {
+  # Re-render + recreate each affected Scion via scion-up (binding-safe:
+  # it re-fetches <SHORT>_SOUL_ID / <SHORT>_RAVEN_TOKEN from Mongo). Honors
+  # whatever pins are currently in stack.enc.env, so it serves both the
+  # forward swap and the rollback recreate. SCION_ID derivation mirrors
+  # bin/thriden-upgrade.sh step 6.
+  local short cname scion_id rc_all=0
+  for short in "${scion_swap_shorts[@]}"; do
+    cname="${proj}-forge-${short}-1"
+    scion_id=$(docker inspect "$cname" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+      | sed -n 's/^SCION_ID=//p' | head -n1)
+    if [[ -z "$scion_id" ]]; then
+      log error "  cannot derive SCION_ID for scion '$short' ($cname not running?); skipping its recreate"
+      rc_all=1
+      continue
+    fi
+    log info "  scion '$short' (id=$scion_id): recreate via bin/thriden-scion-up.sh"
+    if ! ./bin/thriden-scion-up.sh "$scion_id" >&2; then
+      log error "  scion-up failed for '$short'"
+      rc_all=1
+    fi
+  done
+  return "$rc_all"
+}
+
+recreate_failed=false
+# Scion services first: the manifest ordering puts engram before forge, and
+# scion-up recreates engram-<short> then forge-<short> via depends_on, which
+# preserves that contract. Substrate follows.
+if [[ ${#scion_swap_shorts[@]} -gt 0 ]]; then
+  if ! recreate_scions; then
+    recreate_failed=true
+  fi
+fi
+if ! $recreate_failed && [[ ${#swap_services[@]} -gt 0 ]]; then
+  if ! sops exec-env "$stack_env" "docker compose ${compose_files_q} up -d ${swap_services[*]@Q}" 2>&1 | tee -a /tmp/thriden-up-$run_id.log >&2; then
+    recreate_failed=true
+  fi
+fi
+if $recreate_failed; then
+  log error "recreate failed; reverting pins + recreating originals"
   revert_pins
-  sops exec-env "$stack_env" "docker compose -f docker-compose.yml -f compose.prod.yml up -d ${swap_services[*]@Q}" >&2 || \
-    log error "  original-tag recreate also failed; stack in unknown state, manual review required"
+  if [[ ${#scion_swap_shorts[@]} -gt 0 ]]; then
+    recreate_scions || log error "  original-tag scion recreate also failed; stack in unknown state, manual review required"
+  fi
+  if [[ ${#swap_services[@]} -gt 0 ]]; then
+    sops exec-env "$stack_env" "docker compose ${compose_files_q} up -d ${swap_services[*]@Q}" >&2 || \
+      log error "  original-tag recreate also failed; stack in unknown state, manual review required"
+  fi
   set_result_field '.failure_kind' '"startup_crash"'
   finalize rolled_back
   exit 1
@@ -606,7 +920,7 @@ smoke_tier_0() {  # liveness: container reports running within 30s
   local svc="$1"
   local deadline=$(( SECONDS + 30 ))
   while (( SECONDS < deadline )); do
-    state=$(docker compose -f docker-compose.yml -f compose.prod.yml ps --format json "$svc" 2>/dev/null \
+    state=$(docker compose "${compose_files[@]}" ps --format json "$svc" 2>/dev/null \
       | jq -r '.State // empty' | head -1)
     [[ "$state" == "running" ]] && return 0
     sleep 1
@@ -618,10 +932,16 @@ smoke_tier_0() {  # liveness: container reports running within 30s
 # via prefix so engram-helix → 3030, forge-helix → 8200, etc.).
 healthcheck_port_for_svc() {
   case "$1" in
-    nooscope) echo 8080 ;;
-    forge*)   echo 8200 ;;
-    engram*)  echo 3030 ;;
-    *)        echo "" ;;
+    nooscope)  echo 8080 ;;
+    # forge-web (substrate) serves /health on 8200; per-Scion forge runtimes
+    # serve the PF health server on 8100 (see compose-<short>.yml port maps).
+    # The old blanket `forge* → 8200` failed a HEALTHY forge-dm at tier 1 on
+    # the first real brain-swap run (2026-07-03) and triggered a spurious
+    # rollback (xluj integration bug #6).
+    forge-web) echo 8200 ;;
+    forge*)    echo 8100 ;;
+    engram*)   echo 3030 ;;
+    *)         echo "" ;;
   esac
 }
 
@@ -635,8 +955,14 @@ smoke_tier_1() {  # healthcheck: HTTP /health returns 200 within 60s
   fi
   local deadline=$(( SECONDS + 60 ))
   while (( SECONDS < deadline )); do
-    if docker compose -f docker-compose.yml -f compose.prod.yml exec -T "$svc" \
-         sh -c "curl -fsS -o /dev/null -w '%{http_code}' http://localhost:${port}/health 2>/dev/null" \
+    # -L: follow redirects and judge the FINAL status. forge-web v0.11.0's
+    # session middleware 307s anonymous /health to /login (which serves 200)
+    # — the redirect landing proves uvicorn is up and routing, and once PF
+    # exempts /health from auth (PersonaForge bean filed 2026-07-03) the
+    # direct 200 behaves identically. API services (engram, forge-<scion>)
+    # answer 200 directly and are unaffected.
+    if docker compose "${compose_files[@]}" exec -T "$svc" \
+         sh -c "curl -fsSL -o /dev/null -w '%{http_code}' http://localhost:${port}/health 2>/dev/null" \
          2>/dev/null | grep -q 200; then
       return 0
     fi
@@ -649,7 +975,11 @@ smoke_failed=false
 failed_component=""
 for c in "${components[@]}"; do
   tier=$(smoke_tier_for "$c")
-  while IFS= read -r svc; do
+  # Service list rides FD 3, NOT stdin: the `docker compose exec -T` calls
+  # inside this loop forward/consume stdin, which silently ate every service
+  # after the first (xluj integration bug #9 — forge-web was never smoked in
+  # any run; only the component's first service was).
+  while IFS= read -r svc <&3; do
     [[ -z "$svc" ]] && continue
 
     log info "smoke $c/$svc (tier $tier)"
@@ -679,16 +1009,31 @@ for c in "${components[@]}"; do
     # engram-* container; the wrapper fetches it post-swap to verify the
     # new build's query path returns recognised data.
     if (( tier >= 2 )); then
+      # Brain must be ACTIVE for the canary read: a no-op recreate (compose
+      # saw no config change) leaves the container in whatever state it was
+      # in — possibly torpid from a previous wrapper run's exit-torpor, and
+      # read/write endpoints 503 while torpid (xluj integration bug #8).
+      # /admin/rouse is idempotent (no-op on an active brain).
+      docker compose "${compose_files[@]}" exec -T "$svc" \
+        sh -c 'curl -fsS -X POST -H "Authorization: Bearer $ENGRAM_RAVEN_TOKEN" http://localhost:3030/admin/rouse' \
+        >/dev/null 2>&1 || log warn "  pre-canary rouse failed for $svc; canary may 503"
       # Two-call form for clarity: one HEAD-style fetch for the HTTP code,
       # then one body fetch on 200. Either call's failure (timeout, 5xx)
       # is a real Tier 2 fail; 404 is "operator chose not to plant" or
       # "canary went stale" -- both soft, treated as skip-with-note.
-      http_code=$(docker compose -f docker-compose.yml -f compose.prod.yml exec -T "$svc" \
-        sh -c 'curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $ENGRAM_RAVEN_TOKEN" http://localhost:3030/admin/canary' \
-        2>/dev/null || echo "000")
+      # Retry briefly on 503: rouse's HNSW rebuild is fast but not instant.
+      canary_deadline=$(( SECONDS + 20 ))
+      http_code="000"
+      while (( SECONDS < canary_deadline )); do
+        http_code=$(docker compose "${compose_files[@]}" exec -T "$svc" \
+          sh -c 'curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $ENGRAM_RAVEN_TOKEN" http://localhost:3030/admin/canary' \
+          2>/dev/null || echo "000")
+        [[ "$http_code" != "503" ]] && break
+        sleep 2
+      done
       case "$http_code" in
         200)
-          canary_json=$(docker compose -f docker-compose.yml -f compose.prod.yml exec -T "$svc" \
+          canary_json=$(docker compose "${compose_files[@]}" exec -T "$svc" \
             sh -c 'curl -fsS -H "Authorization: Bearer $ENGRAM_RAVEN_TOKEN" http://localhost:3030/admin/canary' \
             2>/dev/null || echo '')
           canary_id=$(echo "$canary_json" | jq -r '.id // empty')
@@ -715,7 +1060,7 @@ for c in "${components[@]}"; do
           ;;
       esac
     fi
-  done < <(compose_services_for "$c")
+  done 3< <(compose_services_for "$c")
 done
 
 # ── Promote or rollback ────────────────────────────────────────────────
@@ -725,8 +1070,13 @@ if $smoke_failed; then
   set_result_field '.failed_component' "\"$failed_component\""
   revert_pins
   log info "recreating original images"
-  sops exec-env "$stack_env" "docker compose -f docker-compose.yml -f compose.prod.yml up -d ${swap_services[*]@Q}" 2>&1 >&2 \
-    || log error "  recreate-original failed; stack in unknown state"
+  if [[ ${#scion_swap_shorts[@]} -gt 0 ]]; then
+    recreate_scions || log error "  recreate-original failed for a scion; stack in unknown state"
+  fi
+  if [[ ${#swap_services[@]} -gt 0 ]]; then
+    sops exec-env "$stack_env" "docker compose ${compose_files_q} up -d ${swap_services[*]@Q}" 2>&1 >&2 \
+      || log error "  recreate-original failed; stack in unknown state"
+  fi
 
   # Restore engram brains from pre-flight backups
   for svc in "${engram_services[@]}"; do
@@ -734,8 +1084,13 @@ if $smoke_failed; then
     [[ "$scion" == "$svc" ]] && scion="default"
     bkp="${backup_path[$scion]:-}"
     if [[ -n "$bkp" && -f "$bkp" ]]; then
+      # Import 503s on a torpid brain (same class as the canary read, bug
+      # #8); rouse first — idempotent, and we torpor again at the end.
+      docker compose "${compose_files[@]}" exec -T "$svc" \
+        sh -c 'curl -fsS -X POST -H "Authorization: Bearer $ENGRAM_RAVEN_TOKEN" http://localhost:3030/admin/rouse' \
+        >/dev/null 2>&1 || log warn "  pre-import rouse failed for $svc; import may 503"
       log info "/admin/import for $svc from $bkp"
-      if docker compose -f docker-compose.yml -f compose.prod.yml exec -T "$svc" \
+      if docker compose "${compose_files[@]}" exec -T "$svc" \
            sh -c 'curl -fsS -X POST -H "Authorization: Bearer $ENGRAM_RAVEN_TOKEN" -H "Content-Type: application/json" --data-binary @- http://localhost:3030/admin/import' \
            < "$bkp" >/dev/null 2>&1; then
         log info "  restore complete for $scion"
@@ -750,13 +1105,31 @@ else
   log info "all smoke tests passed; promoting"
   set_result_field '.succeeded_components' "$(printf '%s\n' "${components[@]}" | jq -R . | jq -s .)"
   finalize succeeded
+
+  # tpo4 hygiene (2wg6): our pins now duplicate what the release tree's
+  # deploy/versions.env carries. Remove each pin whose value matches the
+  # tree so versions.env resumes ownership and the NEXT release's git pull
+  # isn't shadowed. A mismatch is kept and flagged — unsetting it would
+  # silently change the effective version.
+  for var in "${pin_vars[@]}"; do
+    tree_val=$(grep -E "^${var}=" deploy/versions.env 2>/dev/null | head -1 | cut -d= -f2-)
+    if [[ "$tree_val" == "${pin_tag[$var]}" ]]; then
+      if sops unset "$stack_env" "[\"$var\"]" >/dev/null 2>&1; then
+        log info "  unpinned $var (deploy/versions.env owns $tree_val)"
+      else
+        log warn "  could not unpin $var (sops unset failed/unavailable); harmless duplicate of versions.env ($tree_val)"
+      fi
+    else
+      log warn "  keeping pin $var=${pin_tag[$var]} (tree versions.env says '${tree_val:-<absent>}' — pull the release tree, then remove the pin manually)"
+    fi
+  done
 fi
 
 # ── Return engram to torpor (regardless of success/rollback path) ──────
 
 for svc in "${engram_services[@]}"; do
   log info "POST /admin/torpor on $svc (preserve natural circadian rhythm)"
-  if docker compose -f docker-compose.yml -f compose.prod.yml exec -T "$svc" \
+  if docker compose "${compose_files[@]}" exec -T "$svc" \
        sh -c 'curl -fsS -X POST -H "Authorization: Bearer $ENGRAM_RAVEN_TOKEN" http://localhost:3030/admin/torpor' \
        >/dev/null 2>&1; then
     log info "  $svc returned to torpor"

@@ -5,7 +5,14 @@
   "description": "Document shape for the `personaforge.deploy_payloads` collection consumed by `bin/thriden-deploy-payload.sh -i <_id>`. Extends `deploy-payload.schema.json` (Phase 1 input shape) with wrapper-managed and PF-managed fields. Applied as the collection validator by `bin/thriden-deploy-payloads-setup.sh`. See docs/design-upgrade-at-wake.md.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["thriden_version", "components", "ordering", "status", "written_by", "created_at"],
+  "required": [
+    "thriden_version",
+    "components",
+    "ordering",
+    "status",
+    "written_by",
+    "created_at"
+  ],
   "properties": {
     "_id": {
       "description": "Mongo ObjectId. Auto-generated unless PF explicitly sets one.",
@@ -15,15 +22,29 @@
       "type": "string",
       "description": "Human-meaningful label for this bundle. Mirrors the Phase 1 input field; not load-bearing."
     },
+    "min_upgrade_from": {
+      "type": "string",
+      "pattern": "^thriden-v[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Optional lower bound on the host's current umbrella version (). When set, the on-host wrapper REFUSES the deploy (pre-claim in -i mode, so the dispatcher stamps dispatch_error) if the tree's current thriden-v* tag is below this, rather than perform an untested skip-hop that persisted-state migrations don't cover. PF writes it from the release manifest when a release requires stepping through an intermediate version. Format is a full tag, e.g. 'thriden-v0.9.0'; comparison is semver on the X.Y.Z after the prefix."
+    },
     "components": {
       "type": "object",
       "description": "Map of logical component name to image tag. Same constraint as the Phase 1 input schema. Mongo's $jsonSchema doesn't support propertyNames, so the per-key constraint is unrolled into explicit properties + additionalProperties: false.",
       "minProperties": 1,
       "additionalProperties": false,
       "properties": {
-        "engram":   { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
-        "forge":    { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
-        "nooscope": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" }
+        "engram": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "forge": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "nooscope": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$"
+        }
       }
     },
     "ordering": {
@@ -33,33 +54,72 @@
       "uniqueItems": true,
       "items": {
         "type": "string",
-        "enum": ["engram", "forge", "nooscope"]
+        "enum": [
+          "engram",
+          "forge",
+          "nooscope"
+        ]
       }
     },
     "smoke_tier_overrides": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "engram":   { "bsonType": "int", "enum": [0, 1, 2] },
-        "forge":    { "bsonType": "int", "enum": [0, 1, 2] },
-        "nooscope": { "bsonType": "int", "enum": [0, 1, 2] }
+        "engram": {
+          "bsonType": "int",
+          "enum": [
+            0,
+            1,
+            2
+          ]
+        },
+        "forge": {
+          "bsonType": "int",
+          "enum": [
+            0,
+            1,
+            2
+          ]
+        },
+        "nooscope": {
+          "bsonType": "int",
+          "enum": [
+            0,
+            1,
+            2
+          ]
+        }
       }
     },
     "scion_scope": {
-      "description": "Which Scions this payload targets, set by the Forge scheduler () at write time. Either the string \"all\" or a non-empty array of Scion short names (e.g. [\"dm\"]). Consumed by PF's Scion-side orchestrator (): it sets the dispatch signal (dispatch_scion/dispatch_ready_at) for its Scion only when scion_scope is \"all\", absent, or contains its short — absent is treated tolerantly as applicable. NOT consumed by the on-host wrapper, which deploys whatever services run on its host. Optional; absent = unscoped.",
+      "description": "Which Scions this payload targets, set by the Forge scheduler () at write time. Either the string \"all\" or a non-empty array of Scion short names (e.g. [\"dm\"]). Consumed by PF's Scion-side orchestrator (): it sets the dispatch signal (dispatch_scion/dispatch_ready_at) for its Scion only when scion_scope is \"all\", absent, or contains its short \u00e2\u20ac\u201d absent is treated tolerantly as applicable. NOT consumed by the on-host wrapper, which deploys whatever services run on its host. Optional; absent = unscoped.",
       "oneOf": [
-        { "enum": ["all"] },
+        {
+          "enum": [
+            "all"
+          ]
+        },
         {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" }
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]+$"
+          }
         }
       ]
     },
     "status": {
       "description": "Payload state machine. PF writes documents with status: pending; the wrapper transitions through in_progress to one of the terminal states. cancelled is operator-set via mongosh to take a pending payload out of the running.",
-      "enum": ["pending", "in_progress", "succeeded", "rolled_back", "failed", "cancelled"]
+      "enum": [
+        "pending",
+        "in_progress",
+        "succeeded",
+        "rolled_back",
+        "failed",
+        "cancelled"
+      ]
     },
     "written_by": {
       "type": "string",
@@ -71,14 +131,14 @@
     },
     "claimed_by_scion": {
       "type": "string",
-      "description": "Set by the wrapper at claim time (atomic findOneAndUpdate from pending → in_progress). The scion short name (e.g. 'helix'). Distinguishes which scion's orchestrator picked the payload up if multiple are scoped."
+      "description": "Set by the wrapper at claim time (atomic findOneAndUpdate from pending \u00e2\u2020\u2019 in_progress). The scion short name (e.g. 'helix'). Distinguishes which scion's orchestrator picked the payload up if multiple are scoped."
     },
     "triggered_at": {
       "description": "Set at claim time alongside claimed_by_scion.",
       "bsonType": "date"
     },
     "completed_at": {
-      "description": "Set when the wrapper last calls finalize(). For the normal terminal states (succeeded / rolled_back / failed) this marks genuine completion. For the crash-exit path the wrapper calls finalize(in_progress), so completed_at present with status=in_progress is the sentinel that the wrapper died mid-run and the doc is awaiting manual review — it does NOT mean the payload finished successfully.",
+      "description": "Set when the wrapper last calls finalize(). For the normal terminal states (succeeded / rolled_back / failed) this marks genuine completion. For the crash-exit path the wrapper calls finalize(in_progress), so completed_at present with status=in_progress is the sentinel that the wrapper died mid-run and the doc is awaiting manual review \u00e2\u20ac\u201d it does NOT mean the payload finished successfully.",
       "bsonType": "date"
     },
     "result": {
@@ -87,13 +147,21 @@
       "properties": {
         "succeeded_components": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "failed_component": {
           "type": "string"
         },
         "failure_kind": {
-          "enum": ["startup_crash", "healthcheck_timeout", "smoke_test_failed", "wrapper_error", "manual_review_needed"]
+          "enum": [
+            "startup_crash",
+            "healthcheck_timeout",
+            "smoke_test_failed",
+            "wrapper_error",
+            "manual_review_needed"
+          ]
         },
         "rollback_reason": {
           "type": "string"
@@ -109,17 +177,32 @@
     },
     "original_tags": {
       "type": "object",
-      "description": "Per-component image tag values captured before the pin step, so a wrapper rollback can revert deterministically.",
+      "description": "Per-env-var EFFECTIVE revert targets captured before the pin step (keys are compose env var names -- a component may pin several, e.g. forge -> FORGE_VERSION + FORGE_RUNTIME_VERSION): the pre-pin env override if one existed, else the running container's image tag ( true-revert). Empty string = no override existed AND no matching container was running.",
       "additionalProperties": false,
       "properties": {
-        "engram":   { "type": "string" },
-        "forge":    { "type": "string" },
-        "nooscope": { "type": "string" }
+        "ENGRAM_VERSION": {
+          "type": "string"
+        },
+        "FORGE_VERSION": {
+          "type": "string"
+        },
+        "FORGE_RUNTIME_VERSION": {
+          "type": "string"
+        },
+        "NOOSCOPE_VERSION": {
+          "type": "string"
+        }
       }
     },
     "failure_kind": {
       "description": "Wrapper sets this at top level on certain failure paths (legacy from Phase 1 file mode). Mirror of result.failure_kind for callers that don't traverse the nested object.",
-      "enum": ["startup_crash", "healthcheck_timeout", "smoke_test_failed", "wrapper_error", "manual_review_needed"]
+      "enum": [
+        "startup_crash",
+        "healthcheck_timeout",
+        "smoke_test_failed",
+        "wrapper_error",
+        "manual_review_needed"
+      ]
     },
     "failed_component": {
       "type": "string",
@@ -128,19 +211,35 @@
     "succeeded_components": {
       "type": "array",
       "description": "Top-level mirror of result.succeeded_components (same Phase 1 legacy reason).",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "logs": {
       "type": "array",
       "description": "Append-only log of wrapper progress. Each entry is pushed by the wrapper's log() helper.",
       "items": {
         "type": "object",
-        "required": ["ts", "level", "msg"],
+        "required": [
+          "ts",
+          "level",
+          "msg"
+        ],
         "additionalProperties": false,
         "properties": {
-          "ts": { "type": "string" },
-          "level": { "enum": ["info", "warn", "error"] },
-          "msg": { "type": "string" }
+          "ts": {
+            "type": "string"
+          },
+          "level": {
+            "enum": [
+              "info",
+              "warn",
+              "error"
+            ]
+          },
+          "msg": {
+            "type": "string"
+          }
         }
       }
     },
@@ -150,6 +249,14 @@
     },
     "dispatch_ready_at": {
       "description": "Wake-path dispatch signal (). Set by PF alongside dispatch_scion at the sleep->torpor transition. The host dispatcher only acts on it while fresh (within THRIDEN_DISPATCH_STALE_AFTER_MIN); a stale signal means the torpor window passed and is skipped.",
+      "bsonType": "date"
+    },
+    "dispatch_error": {
+      "type": "string",
+      "description": "Set by the on-host dispatcher (bin/thriden-deploy-dispatch.sh) when the wrapper exits non-zero while the payload is STILL pending -- i.e. it failed BEFORE the atomic pending->in_progress claim (host.enc.env resolution, git self-sync to thriden_version, etc.), so the wrapper never got to mirror status/logs to this doc (). Without this the only evidence was host journalctl and the operator woke to an unexplained un-upgraded Scion. A short human-readable reason (wrapper exit code + last error line), so Forge can surface 'your scheduled upgrade could not start'. NOT set for post-claim failures (those carry status + logs + failure_kind) nor for the benign claim race (the doc is already in_progress by the winning runner). Cleared/overwritten on the next dispatch attempt. Paired with dispatch_error_at."
+    },
+    "dispatch_error_at": {
+      "description": "When the dispatcher stamped dispatch_error. Paired with it ().",
       "bsonType": "date"
     }
   }

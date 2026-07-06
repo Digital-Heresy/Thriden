@@ -150,6 +150,71 @@ sops exec-env "$SECRETS" \
   "$BASE_COMPOSE exec -T forge-web personaforge-admin scion update $SCION_ID engram_external=true" \
   >/dev/null 2>&1 || echo "   (warning: could not set engram_external; set it from the detail page)" >&2
 
+# ── Auto-plant a smoke canary () ──────────────────────────────
+# A fresh Scion has no canary, so every upgrade-at-wake deploy tier-2 soft-skips
+# and retrieval-path validation is silently off until an operator remembers
+# runbook-provision-scion § 8. Beta participants will not remember. Plant (or
+# refresh) it here: designate the newest node via engram's /admin/canary/plant.
+# Idempotent — re-planting on every scion-up self-heals a stale/deleted canary
+# (staleness was the 8unq soft-skip's second cause). Strictly best-effort: a
+# failure never fails the bring-up (the brain is already online + bound).
+#
+# The raven token stays IN the container (curl reads $ENGRAM_RAVEN_TOKEN there),
+# never threaded through the host env; the plant body crosses via stdin to
+# curl --data-binary @-, so the node id never rides a shell string (5hxi). jq
+# parses on the host — the engram image ships curl but not jq (same split as
+# bin/thriden-deploy-payload.sh). Always returns 0.
+plant_smoke_canary() {
+  local svc="engram-$short" i ready=0 nodes_json node_id
+  if ! command -v jq >/dev/null; then
+    echo "   (canary: jq not on host; skipping auto-plant — tier-2 will soft-skip)" >&2
+    return 0
+  fi
+  # Wait for the freshly-(re)started brain's HTTP to answer. /health is
+  # unauthenticated and not torpor-gated.
+  for i in $(seq 1 15); do
+    if sops exec-env "$SECRETS" \
+         "$BASE_COMPOSE -f $file exec -T $svc sh -c 'curl -fsS -o /dev/null http://localhost:3030/health'" \
+         >/dev/null 2>&1; then ready=1; break; fi
+    sleep 2
+  done
+  if [ "$ready" -ne 1 ]; then
+    echo "   (canary: $svc /health not ready after ~30s; skipping auto-plant)" >&2
+    return 0
+  fi
+  # /nodes + /admin/canary/plant 503 while torpid (a recreate can resume
+  # torpid); rouse is idempotent (no-op on an active brain).
+  sops exec-env "$SECRETS" \
+    "$BASE_COMPOSE -f $file exec -T $svc sh -c 'curl -fsS -X POST -H \"Authorization: Bearer \$ENGRAM_RAVEN_TOKEN\" http://localhost:3030/admin/rouse'" \
+    >/dev/null 2>&1 || echo "   (canary: pre-read rouse failed; /nodes may 503)" >&2
+  # Newest node is the canary target. /nodes?limit=1 is cheap (early-break, one
+  # store.get); host-side jq pulls the id out.
+  nodes_json=$(sops exec-env "$SECRETS" \
+    "$BASE_COMPOSE -f $file exec -T $svc sh -c 'curl -fsS -H \"Authorization: Bearer \$ENGRAM_RAVEN_TOKEN\" \"http://localhost:3030/nodes?limit=1\"'" \
+    2>/dev/null || true)
+  node_id=$(printf '%s' "$nodes_json" | jq -r '.[0].id // empty' 2>/dev/null || true)
+  if [ -z "$node_id" ]; then
+    echo "   (canary: $svc has no nodes yet; skipping — tier-2 soft-skips until the brain has content)" >&2
+    return 0
+  fi
+  # Defense in depth: the id is from our own API, but validate the UUID charset
+  # before it's used (it doesn't enter a command string — the body crosses via
+  # stdin to curl --data-binary @-, the same way the wrapper feeds /admin/import).
+  case "$node_id" in
+    ''|*[!0-9A-Fa-f-]*)
+      echo "   (canary: unexpected node id from /nodes; skipping)" >&2; return 0 ;;
+  esac
+  if printf '{"node_id":"%s"}' "$node_id" | sops exec-env "$SECRETS" \
+       "$BASE_COMPOSE -f $file exec -T $svc sh -c 'curl -fsS -X POST -H \"Authorization: Bearer \$ENGRAM_RAVEN_TOKEN\" -H \"Content-Type: application/json\" --data-binary @- http://localhost:3030/admin/canary/plant'" \
+       >/dev/null 2>&1; then
+    echo ">> planted smoke canary on $svc: node $node_id (tier-2 now armed)" >&2
+  else
+    echo "   (canary: plant call failed for $svc; tier-2 will soft-skip — plant manually per runbook-provision-scion § 8)" >&2
+  fi
+  return 0
+}
+plant_smoke_canary
+
 echo ">> up. verify the binding + health:" >&2
 echo "     $BASE_COMPOSE -f $file ps" >&2
 echo "     $BASE_COMPOSE -f $file exec engram-$short cat /data/instance.json" >&2

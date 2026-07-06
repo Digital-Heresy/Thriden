@@ -11,9 +11,14 @@
       "type": "string",
       "description": "Human-meaningful label for this bundle. Not load-bearing — appears in logs and the result file."
     },
+    "min_upgrade_from": {
+      "type": "string",
+      "pattern": "^thriden-v[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Optional lower bound on the host's current umbrella version (). When set, the wrapper REFUSES the deploy if the tree's current thriden-v* tag is below this, rather than perform an untested skip-hop that persisted-state migrations don't cover. Set it only on a release that genuinely requires stepping through an intermediate version. Format is a full tag, e.g. 'thriden-v0.9.0'; comparison is semver on the X.Y.Z after the prefix."
+    },
     "components": {
       "type": "object",
-      "description": "Map of logical component name to image tag. Logical names map to compose env vars (engram → ENGRAM_VERSION, forge → FORGE_VERSION, nooscope → NOOSCOPE_VERSION) which are interpolated into image: refs in compose.prod.yml.",
+      "description": "Map of logical component name to image tag. Logical names map to compose env vars (engram → ENGRAM_VERSION, forge → FORGE_VERSION + FORGE_RUNTIME_VERSION, nooscope → NOOSCOPE_VERSION) which are interpolated into image: refs in compose.prod.yml and the per-Scion compose-<short>.yml drop-ins.",
       "minProperties": 1,
       "propertyNames": {
         "enum": ["engram", "forge", "nooscope"]

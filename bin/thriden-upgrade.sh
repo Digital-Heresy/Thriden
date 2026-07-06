@@ -52,6 +52,14 @@ cd "$STACK_DIR"
 proj="${COMPOSE_PROJECT_NAME:-$(basename "$STACK_DIR")}"
 
 # ── 1. Pull the recipe (versions.env + compose defaults travel with it) ──────
+# A prior scheduled deploy (bin/thriden-deploy-payload.sh self-sync, )
+# leaves HEAD detached at a release tag; `git pull --ff-only` can't fast-forward a
+# detached HEAD. Re-attach to main first — but only when detached, so an operator
+# deliberately on a branch isn't yanked off it. No-op on a host already on a branch.
+if ! git symbolic-ref -q HEAD >/dev/null; then
+  echo ">> HEAD detached (prior scheduled deploy) — checking out main ..." >&2
+  git checkout main
+fi
 echo ">> git pull --ff-only ..." >&2
 git pull --ff-only
 
