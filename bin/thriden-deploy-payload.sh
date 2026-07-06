@@ -69,6 +69,16 @@ while getopts "m:i:h:r:s:S" opt; do
   esac
 done
 
+# Resolve our own absolute path ONCE, up front, and re-exec through it instead of
+# a bare "$0" ( hardening). The three re-execs below (sops self-wrap,
+# -S file sync, -i mongo sync) are sound today — the dispatcher invokes us by
+# absolute path and the wrapper never cd's — but `exec "$0"` would silently fail
+# if a future refactor added a cd before a re-exec, or if we were invoked by a
+# bare relative name from another cwd. BASH_SOURCE[0] is the script's own path
+# even after a prior exec munges $0; passing $self (absolute) forward keeps every
+# re-exec incarnation pointed at the same on-disk file.
+self="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
+
 # -m and -i are mutually exclusive; exactly one must be set.
 if [[ -n "$manifest" && -n "$mongo_id" ]]; then
   echo "ERROR: -m and -i are mutually exclusive (file-based vs Mongo-based manifest)" >&2
@@ -116,8 +126,16 @@ git_sync_to_tag() {
   local target="$1"
   [[ "$(git describe --tags --exact-match HEAD 2>/dev/null || true)" == "$target" ]] && return 0
   # A deploy host must be pristine -- refuse rather than clobber local work.
-  if ! git diff --quiet || ! git diff --cached --quiet; then
-    echo "ERROR: refusing to checkout '$target' over a dirty tree; resolve local changes first" >&2
+  # EXCEPT secrets/: every deploy runs `sops set`/`unset` on
+  # secrets/prod/stack.enc.env, and SOPS re-encryption is non-deterministic (a
+  # fresh nonce each time), so that file is left git-dirty after ANY deploy —
+  # even a clean, fully-unpinned one. Excluding secrets/ from the guard stops
+  # that self-inflicted noise from refusing the NEXT hop pre-claim, which bit
+  # hosts mid-upgrade (). The guard still protects uncommitted
+  # code/compose edits — the operator work it actually exists to defend.
+  if ! git diff --quiet -- . ':(exclude)secrets/' \
+     || ! git diff --cached --quiet -- . ':(exclude)secrets/'; then
+    echo "ERROR: refusing to checkout '$target' over a dirty tree (non-secret changes); resolve local changes first" >&2
     return 1
   fi
   echo "[sync] fetching tags + checking out $target" >&2
@@ -130,8 +148,19 @@ git_sync_to_tag() {
     return 1
   fi
   if ! git checkout --quiet "$target"; then
-    echo "ERROR: checkout of '$target' failed" >&2
-    return 1
+    # The only expected block is sops-dirtied secrets/ whose committed blob
+    # differs between releases (j248): git refuses to overwrite the locally
+    # re-encrypted file. Discarding that working-tree noise is safe — the target
+    # tag carries the canonical secret base, and the live version pins are
+    # re-applied by the pin step after sync. We touch secrets/ ONLY when the
+    # checkout actually conflicts, never pre-emptively.
+    echo "[sync] checkout blocked; discarding sops noise under secrets/ and retrying" >&2
+    git restore --quiet --worktree --staged -- secrets/ 2>/dev/null \
+      || git checkout --quiet -- secrets/ 2>/dev/null || true
+    if ! git checkout --quiet "$target"; then
+      echo "ERROR: checkout of '$target' failed" >&2
+      return 1
+    fi
   fi
   return 0
 }
@@ -210,7 +239,7 @@ if [[ "$do_sync" == 1 && -z "${THRIDEN_PAYLOAD_SYNCED:-}" ]]; then
   git_sync_to_tag "$sync_target" || exit 1
   # Re-exec the (now-current) script; guard prevents a sync loop.
   export THRIDEN_PAYLOAD_SYNCED=1
-  exec "$0" "$@"
+  exec "$self" "$@"
 fi
 if [[ -n "$mongo_id" && ! "$mongo_id" =~ ^[a-fA-F0-9]{24}$ ]]; then
   echo "ERROR: -i value '$mongo_id' is not a valid Mongo ObjectId (24 hex chars)" >&2
@@ -253,7 +282,7 @@ done
 # simple tokens (ObjectIds, paths, shorts), safe for %q re-quoting into the
 # single command string sops exec-env expects.
 if [[ -z "${MONGO_ROOT_PASSWORD:-}" ]]; then
-  exec sops exec-env "$stack_env" "$(printf '%q ' "$0" "$@")"
+  exec sops exec-env "$stack_env" "$(printf '%q ' "$self" "$@")"
 fi
 
 # ── Compose file set: base + prod + per-Scion drop-ins ─────────────────
@@ -466,7 +495,7 @@ if [[ -n "$mongo_id" ]]; then
       || { echo "ERROR: payload $mongo_id refused by min_upgrade_from floor; doc left pending" >&2; exit 1; }
     git_sync_to_tag "$sync_target" || { echo "ERROR: self-sync failed; payload $mongo_id left pending, reclaimable" >&2; exit 1; }
     export THRIDEN_PAYLOAD_SYNCED=1
-    exec "$0" "$@"
+    exec "$self" "$@"
   fi
 
   # Fetch + claim from Mongo. Write the input-shape subdoc out to a temp
@@ -806,6 +835,45 @@ for c in "${components[@]}"; do
   done <<< "$vars"
 done
 
+# Make the pin set visible in the result doc + logs. The 2026-07-06 Cairn
+# v0.10.0 rollback left forge-dm stranded on the new version because
+# FORGE_RUNTIME_VERSION never entered the pin/revert accounting for that run —
+# and nothing logged its absence, so the split was invisible until an operator
+# eyeballed `docker ps`. Log the resolved pin set so a missing scion var is
+# caught immediately next time ().
+log info "pin set: ${pin_vars[*]}"
+
+# Belt-and-suspenders scion runtime/brain revert target (). The
+# per-Scion runtime (forge-<short>) and brain (engram-<short>) are (re)rendered
+# by bin/thriden-scion-up.sh, which sources deploy/versions.env — the TREE
+# recipe — on every recreate. That export wins over any pin the generic loop
+# above missed, so on a rollback scion-up drags the runtime back to the new
+# release (exactly what stranded forge-dm on v0.12.0). Capture the pre-deploy
+# scion tags directly here and force-pin them on revert so stack.enc.env (which
+# scion-up's `sops exec-env "$SECRETS"` layers ON TOP of versions.env)
+# authoritatively holds the runtime/brain at their pre-deploy versions, whatever
+# the generic loop did. NOTE: FORGE_RUNTIME_VERSION / ENGRAM_VERSION are single
+# vars shared across all in-scope scions; running_tag_for_var picks the first
+# scion's container, so a heterogeneous-version fleet reverts all in-scope
+# scions to that one tag (a pre-existing single-var-design limitation).
+declare -A scion_pre_tag
+if (( ${#scion_swap_shorts[@]} > 0 )); then
+  for _v in FORGE_RUNTIME_VERSION ENGRAM_VERSION; do
+    _t=$(running_tag_for_var "$_v")
+    [[ -n "$_t" ]] && scion_pre_tag[$_v]="$_t"
+  done
+  # Self-diagnosing: scions are in scope, so running_tag_for_var MUST resolve at
+  # least the forge runtime tag from a running forge-<short>. An empty result
+  # means the revert force-pin below will silently no-op and the runtime could
+  # strand again — the exact blind spot this fix exists to close — so make it
+  # loud rather than trusting it worked (ru4g review follow-up).
+  if (( ${#scion_pre_tag[@]} == 0 )); then
+    log warn "ru4g: scion(s) in scope [${scion_swap_shorts[*]}] but captured NO pre-deploy runtime/brain tag — running_tag_for_var found no forge-<short>/engram-<short> container; rollback CANNOT hold the scion runtime down, manual review if this deploy reverts"
+  else
+    log info "scion runtime/brain pre-deploy tags: $(for k in "${!scion_pre_tag[@]}"; do printf '%s=%s ' "$k" "${scion_pre_tag[$k]}"; done)"
+  fi
+fi
+
 # Save originals into result file so a re-run knows what to revert to
 originals_json='{}'
 for var in "${pin_vars[@]}"; do
@@ -843,6 +911,16 @@ revert_pins() {
         fi
         ;;
     esac
+  done
+  # : unconditionally pin the scion runtime/brain vars to their
+  # captured pre-deploy tags. The generic loop above may never have processed
+  # these (the v0.10.0 rollback proved it can be skipped), and even when it does,
+  # scion-up re-sources deploy/versions.env on recreate — so this explicit pin is
+  # the only thing that guarantees the recreate below cannot re-derive the new
+  # release from the tree recipe. Idempotent with the loop when it did pin them.
+  for var in "${!scion_pre_tag[@]}"; do
+    sops set "$stack_env" "[\"$var\"]" "\"${scion_pre_tag[$var]}\""
+    log info "  pinned $var=${scion_pre_tag[$var]} (scion runtime/brain revert target, ru4g; shadow over deploy/versions.env, clears on next successful upgrade)"
   done
 }
 
@@ -973,6 +1051,39 @@ smoke_tier_1() {  # healthcheck: HTTP /health returns 200 within 60s
 
 smoke_failed=false
 failed_component=""
+
+# A smoke failure on a NON-GATING component records + warns but never rolls the
+# bundle back. nooscope is non-gating (): it is a stateless,
+# read-only viewer whose boot hard-depends on forge-web's /scions roster (its
+# entrypoint exit-1s if the roster fetch fails), so during a deploy window —
+# when forge-web is itself being recreated — nooscope reliably false-negatives
+# its healthcheck. A graph viewer that can't reach a still-warming substrate
+# must not veto a brain+runtime upgrade that otherwise passed. Gating components
+# (engram brain, forge runtime + substrate) still roll back on failure.
+smoke_is_gating() {
+  case "$1" in
+    nooscope) return 1 ;;
+    *)        return 0 ;;
+  esac
+}
+soft_smoke_failures=()
+# note_smoke_fail <component> <svc> <failure_kind> <message>
+# Returns 0 (gating: caller should `break 2` and roll back the bundle) or
+# 1 (soft: caller should `continue` to the next service).
+note_smoke_fail() {
+  local c="$1" svc="$2" kind="$3" msg="$4"
+  if smoke_is_gating "$c"; then
+    log error "$msg"
+    smoke_failed=true
+    failed_component="$c"
+    set_result_field '.failure_kind' "\"$kind\""
+    return 0
+  fi
+  log warn "$msg — non-gating component ($c); recording, NOT rolling back (m3wj)"
+  soft_smoke_failures+=("$c/$svc:$kind")
+  return 1
+}
+
 for c in "${components[@]}"; do
   tier=$(smoke_tier_for "$c")
   # Service list rides FD 3, NOT stdin: the `docker compose exec -T` calls
@@ -986,21 +1097,13 @@ for c in "${components[@]}"; do
 
     # Tier 0
     if ! smoke_tier_0 "$svc"; then
-      log error "tier 0 (liveness) failed for $svc after 30s"
-      smoke_failed=true
-      failed_component="$c"
-      set_result_field '.failure_kind' '"startup_crash"'
-      break 2
+      note_smoke_fail "$c" "$svc" startup_crash "tier 0 (liveness) failed for $svc after 30s" && break 2 || continue
     fi
 
     # Tier 1
     if (( tier >= 1 )); then
       if ! smoke_tier_1 "$svc"; then
-        log error "tier 1 (healthcheck) failed for $svc after 60s"
-        smoke_failed=true
-        failed_component="$c"
-        set_result_field '.failure_kind' '"healthcheck_timeout"'
-        break 2
+        note_smoke_fail "$c" "$svc" healthcheck_timeout "tier 1 (healthcheck) failed for $svc after 60s" && break 2 || continue
       fi
     fi
 
@@ -1040,11 +1143,7 @@ for c in "${components[@]}"; do
           if [[ -n "$canary_id" ]]; then
             log info "tier 2 pass: $svc canary $canary_id retrieved"
           else
-            log error "tier 2 failed: $svc /admin/canary returned 200 but no valid .id field"
-            smoke_failed=true
-            failed_component="$c"
-            set_result_field '.failure_kind' '"smoke_test_failed"'
-            break 2
+            note_smoke_fail "$c" "$svc" smoke_test_failed "tier 2 failed: $svc /admin/canary returned 200 but no valid .id field" && break 2 || continue
           fi
           ;;
         404)
@@ -1052,16 +1151,20 @@ for c in "${components[@]}"; do
           log warn "  to enable Tier 2 for this Scion: POST /admin/canary/plant with an existing node_id"
           ;;
         *)
-          log error "tier 2 failed: $svc /admin/canary returned http $http_code"
-          smoke_failed=true
-          failed_component="$c"
-          set_result_field '.failure_kind' '"smoke_test_failed"'
-          break 2
+          note_smoke_fail "$c" "$svc" smoke_test_failed "tier 2 failed: $svc /admin/canary returned http $http_code" && break 2 || continue
           ;;
       esac
     fi
   done 3< <(compose_services_for "$c")
 done
+
+# Non-gating smoke failures (nooscope) are recorded in the result doc for the
+# operator but do NOT trigger a rollback ().
+if (( ${#soft_smoke_failures[@]} > 0 )); then
+  soft_json=$(printf '%s\n' "${soft_smoke_failures[@]}" | jq -R . | jq -s .)
+  set_result_field '.soft_smoke_failures' "$soft_json"
+  log warn "non-gating smoke failures recorded (bundle NOT rolled back): ${soft_smoke_failures[*]}"
+fi
 
 # ── Promote or rollback ────────────────────────────────────────────────
 
@@ -1077,6 +1180,19 @@ if $smoke_failed; then
     sops exec-env "$stack_env" "docker compose ${compose_files_q} up -d ${swap_services[*]@Q}" 2>&1 >&2 \
       || log error "  recreate-original failed; stack in unknown state"
   fi
+
+  # : record the actual post-revert scion image tags so a runtime
+  # that failed to roll back (the v0.10.0 forge-dm split) is visible in the
+  # result doc instead of only in `docker ps`. A mismatch vs scion_pre_tag here
+  # means the force-pin above did not take — manual review.
+  for short in "${scion_swap_shorts[@]}"; do
+    for pfx in engram forge; do
+      cn="${proj}-${pfx}-${short}-1"
+      docker inspect "$cn" >/dev/null 2>&1 || continue
+      img=$(docker inspect "$cn" --format '{{.Config.Image}}' 2>/dev/null)
+      log info "  post-revert ${pfx}-${short} image: ${img##*:}"
+    done
+  done
 
   # Restore engram brains from pre-flight backups
   for svc in "${engram_services[@]}"; do
