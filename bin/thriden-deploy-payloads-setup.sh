@@ -15,18 +15,60 @@
 # precondition is in place.
 #
 # Usage:
-#   bin/thriden-deploy-payloads-setup.sh
+#   bin/thriden-deploy-payloads-setup.sh          # prod host (SOPS + prod overlay)
+#   bin/thriden-deploy-payloads-setup.sh --dev     # local dev stack (bare compose)
 #
-# Pre-reqs: docker compose stack up; jq + docker available on the host.
+# Pre-reqs: docker compose stack up; docker available on the host.
+# Prod also needs sops (for the MONGO_ROOT_PASSWORD self-wrap).
 #
 # Bean:  Phase 3
 # Schema: schemas/deploy-payload-mongo.schema.json
 
 set -euo pipefail
 
+# ── Self-locate: cd to the repo root ────────────────────────────────────────
+# Relative paths below (schema, compose files, secrets, the host-short pin) all
+# assume the repo root as cwd. Resolve our own on-disk location and cd there so
+# the operator can invoke us by absolute path from anywhere (e.g.
+# `/srv/thriden/bin/thriden-deploy-payloads-setup.sh` from $HOME) -- not only
+# from a shell already sitting in the repo root. BASH_SOURCE[0] survives a later
+# `exec` munging $0; $self is passed forward on the SOPS re-exec so every
+# incarnation points at the same file. (Mirrors bin/thriden-deploy-payload.sh.)
+self="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
+cd -- "$(dirname -- "$self")/.." || { echo "ERROR: cannot cd to repo root" >&2; exit 1; }
+
+# ── Dev/localhost mode ──────────────────────────────────────────────────────
+# --dev targets a bare `docker compose` stack (docker-compose.yml + its
+# auto-loaded docker-compose.override.yml) instead of the prod overlay, skips
+# the SOPS self-wrap (dev creds come from the repo-root .env that docker compose
+# auto-loads), and skips the prod-only host-short pin. Use it for the localhost
+# Scions -- the prod path assumes secrets/prod/stack.enc.env + compose.prod.yml.
+dev=false
+for arg in "$@"; do
+  case "$arg" in
+    --dev) dev=true ;;
+    -h|--help)
+      echo "Usage: $0 [--dev]"
+      echo "  --dev   target the local dev stack (no prod overlay, no SOPS)"
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument '$arg' (accepts: --dev)" >&2
+      exit 1
+      ;;
+  esac
+done
+
 schema_file="schemas/deploy-payload-mongo.schema.json"
 
-for dep in jq docker sops; do
+# Prod needs sops (self-wrap for MONGO_ROOT_PASSWORD); dev reads it from .env.
+# No jq: the schema's metadata-key strip happens in the mongosh JS below, so
+# the host needs no JSON tooling (one less prereq on a Windows/dev box).
+required_deps=(docker)
+if ! $dev; then
+  required_deps+=(sops)
+fi
+for dep in "${required_deps[@]}"; do
   if ! command -v "$dep" >/dev/null; then
     echo "ERROR: required tool '$dep' not in PATH" >&2
     exit 1
@@ -34,7 +76,7 @@ for dep in jq docker sops; do
 done
 
 if [[ ! -f "$schema_file" ]]; then
-  echo "ERROR: $schema_file not found (run from repo root)" >&2
+  echo "ERROR: $schema_file not found (incomplete checkout? expected at repo root $(pwd))" >&2
   exit 1
 fi
 
@@ -44,88 +86,59 @@ fi
 # exec-env so the operator can just run this directly (no manual `sops exec-env`
 # wrapper). Guard: on the re-exec the secret is set, so we fall through.
 stack_env="secrets/prod/stack.enc.env"
-if [[ -z "${MONGO_ROOT_PASSWORD:-}" && -f "$stack_env" ]]; then
-  exec sops exec-env "$stack_env" "$0"
+if ! $dev && [[ -z "${MONGO_ROOT_PASSWORD:-}" && -f "$stack_env" ]]; then
+  exec sops exec-env "$stack_env" "$self"
 fi
 
-# Strip JSON Schema metadata keys ($schema, $id, title, description) that
-# Mongo's $jsonSchema validator doesn't consume. Keep everything else.
-# Also: deeply walk the schema and rename `type` -> `bsonType` for the
-# leaf fields where we explicitly typed against BSON (objectId, date).
-# But since our schema already uses `bsonType` where appropriate, all we
-# need is the top-level strip.
-schema_inner=$(jq 'del(."$schema", ."$id", .title, .description)' "$schema_file")
+# Pass the raw schema file through; the metadata-key strip ($schema, $id,
+# title, description -- keys Mongo's $jsonSchema validator doesn't consume)
+# happens in the shared JS. The schema already uses `bsonType` where BSON types
+# (objectId, date) matter, so a top-level key strip is all that's needed.
+schema_inner=$(cat "$schema_file")
 
-# Build the mongosh script. Schema is passed via env var so the script
-# can JSON.parse it cleanly; no JS-source interpolation of operator data.
-read -r -d '' MONGO_SCRIPT <<'JS' || true
-const schema = JSON.parse(process.env.MONGO_QUERY_SCHEMA);
-const cols = db.getCollectionNames();
-if (cols.includes("deploy_payloads")) {
-  const result = db.runCommand({
-    collMod: "deploy_payloads",
-    validator: {$jsonSchema: schema},
-    validationLevel: "strict",
-    validationAction: "error"
-  });
-  print("collMod result: " + JSON.stringify(result));
-} else {
-  db.createCollection("deploy_payloads", {
-    validator: {$jsonSchema: schema},
-    validationLevel: "strict",
-    validationAction: "error"
-  });
-  print("created collection deploy_payloads with validator");
-}
-// Sanity probe: confirm validator landed.
-const opts = db.runCommand({listCollections: 1, filter: {name: "deploy_payloads"}}).cursor.firstBatch[0].options;
-if (!opts || !opts.validator || !opts.validator.$jsonSchema) {
-  print("ERROR: validator did not land");
-  quit(1);
-}
-print("validator confirmed; deploy_payloads is ready for Forge to write into");
-
-// Partial unique index: at most one PENDING payload per thriden_version.
-// Hardens PF's schedule-writer duplicate guard (a soft TOCTOU: check-then-
-// insert) into a DB-enforced invariant. partialFilterExpression scopes the
-// constraint to status:"pending" so terminal states (succeeded/failed/...)
-// can freely repeat a thriden_version. Idempotent: createIndex no-ops if the
-// same index already exists. Non-fatal on failure (e.g. a collection that
-// already holds duplicate pending docs) -- the validator is the critical part.
-try {
-  db.deploy_payloads.createIndex(
-    { thriden_version: 1, status: 1 },
-    { unique: true, partialFilterExpression: { status: "pending" }, name: "uniq_pending_thriden_version" }
-  );
-  print("partial unique index uniq_pending_thriden_version ensured");
-} catch (e) {
-  print("WARNING: could not create uniq_pending_thriden_version index: " + e.message);
-  print("  resolve duplicate pending payloads (cancel all but one), then re-run this script");
-}
-JS
+# The mongosh apply logic lives in a shared file so it can't drift from the
+# `deploy-payloads-init` compose service that does the same job automatically.
+# Piped to mongosh's stdin (schema passed via env), same as before.
+js_file="bin/deploy-payloads-validator.mongo.js"
+if [[ ! -f "$js_file" ]]; then
+  echo "ERROR: $js_file not found (incomplete checkout? expected at repo root $(pwd))" >&2
+  exit 1
+fi
 
 echo "[setup] applying validator from $schema_file to personaforge.deploy_payloads"
 
+# Dev runs bare so docker compose auto-loads docker-compose.override.yml (the
+# stack the operator actually brought up); prod adds the image-pinned overlay.
+if $dev; then
+  compose_files=()
+else
+  compose_files=(-f docker-compose.yml -f compose.prod.yml)
+fi
+
 MONGO_QUERY_SCHEMA="$schema_inner" \
-docker compose -f docker-compose.yml -f compose.prod.yml exec -T \
+docker compose "${compose_files[@]}" exec -T \
   -e MONGO_QUERY_SCHEMA="$schema_inner" \
   mongodb \
   sh -c 'mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/personaforge?authSource=admin" --quiet' \
-  <<< "$MONGO_SCRIPT"
+  < "$js_file"
 
 # ── Pin the host short name (host-short resolution, xluj integration bug #3) ──
 # Unattended paths (the wake-path dispatcher -> wrapper) can't pass -h, so pin
 # the secrets-bundle name once per host. The lib's fallback chain resolves a
 # single-host install unaided, but an explicit pin survives a second host dir
 # appearing in the secrets tree.
-# shellcheck source=bin/thriden-host-short.lib.sh
-. "$(dirname "$0")/thriden-host-short.lib.sh"
-if [[ ! -s .thriden-host-short ]]; then
-  pinned_host_short="$(thriden_resolve_host_short)"
-  printf '%s\n' "$pinned_host_short" > .thriden-host-short
-  echo "[setup] pinned host short name '$pinned_host_short' -> .thriden-host-short"
-else
-  echo "[setup] host short pin already present: $(tr -d '[:space:]' < .thriden-host-short)"
+# Dev has no secrets/prod/hosts/ tree and never runs the unattended dispatcher,
+# so the pin is prod-only.
+if ! $dev; then
+  # shellcheck source=bin/thriden-host-short.lib.sh
+  . "$(dirname "$0")/thriden-host-short.lib.sh"
+  if [[ ! -s .thriden-host-short ]]; then
+    pinned_host_short="$(thriden_resolve_host_short)"
+    printf '%s\n' "$pinned_host_short" > .thriden-host-short
+    echo "[setup] pinned host short name '$pinned_host_short' -> .thriden-host-short"
+  else
+    echo "[setup] host short pin already present: $(tr -d '[:space:]' < .thriden-host-short)"
+  fi
 fi
 
 echo "[setup] done"

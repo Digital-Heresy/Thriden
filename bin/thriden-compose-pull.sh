@@ -152,7 +152,13 @@ done
 trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
 printf '%s' "$GHCR_PULL_TOKEN" | \
   docker login ghcr.io -u "$GHCR_PULL_USER" --password-stdin
-docker compose "${compose_args[@]}" pull
+# --policy always overrides each service's pull_policy for this explicit pull
+# step. compose.prod.yml pins `pull_policy: missing` on forge-web/nooscope/caddy
+# so `up -d` reuses local images; without the override a plain `pull` skips any
+# image already present locally and never fetches a moving tag like :main
+# (). The later `up -d --pull never` still reuses this just-pulled
+# image, so the credential-window discipline is preserved.
+docker compose "${compose_args[@]}" pull --policy always
 INNER_EOF
 chmod +x "$inner"
 

@@ -275,11 +275,11 @@ print(v ? JSON.stringify(v) : "__NO_VALIDATOR__");'
   case "$live" in
     *__MISSING_COLLECTION__*)
       report FAIL "5. deploy_payloads validator" "deploy_payloads collection does not exist" \
-        "run bin/thriden-deploy-payloads-setup.sh (secrets-ops.md § 6c) before scheduling any upgrade"
+        "the deploy-payloads-init service applies this on 'docker compose up'; recreate it (up -d deploy-payloads-init) or run bin/thriden-deploy-payloads-setup.sh"
       return ;;
     *__NO_VALIDATOR__*)
       report FAIL "5. deploy_payloads validator" "collection exists but carries NO \$jsonSchema validator" \
-        "run bin/thriden-deploy-payloads-setup.sh to apply the validator"
+        "recreate the deploy-payloads-init service (up -d deploy-payloads-init) or run bin/thriden-deploy-payloads-setup.sh to apply the validator"
       return ;;
   esac
   # Present -> is it current? Compare against the shipped schema, stripped of
@@ -291,7 +291,7 @@ print(v ? JSON.stringify(v) : "__NO_VALIDATOR__");'
   else
     report WARN "5. deploy_payloads validator" \
       "validator present but DIFFERS from schemas/deploy-payload-mongo.schema.json (stale)" \
-      "re-run bin/thriden-deploy-payloads-setup.sh to refresh the validator (present-but-stale gate)"
+      "a 'docker compose up' re-applies it via deploy-payloads-init (self-heals after git pull); or re-run bin/thriden-deploy-payloads-setup.sh"
   fi
 }
 
@@ -438,8 +438,12 @@ check_tree() {
     # keep going to also report cleanliness below
   fi
   # Cleanliness, ignoring sops re-encryption noise under secrets/ (j248).
+  # Porcelain is "XY<space>PATH"; match the path column (starts at char 4) so a
+  # worktree-modified secret (" M secrets/…", Y=M) is excluded too — matching on
+  # the status chars ('^.[ ?] secrets/') missed exactly that case and turned
+  # benign sops diffs into a false FAIL.
   local dirt tracked untracked
-  dirt="$(git status --porcelain 2>/dev/null | grep -vE '^.[ ?] secrets/' || true)"
+  dirt="$(git status --porcelain 2>/dev/null | grep -vE '^...secrets/' || true)"
   tracked="$(printf '%s\n' "$dirt" | grep -E '^ ?[MADRCU]' || true)"
   untracked="$(printf '%s\n' "$dirt" | grep -E '^\?\?' || true)"
   if [[ -n "$tracked" ]]; then

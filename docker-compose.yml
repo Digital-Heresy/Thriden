@@ -33,6 +33,33 @@ services:
       resources:
         limits:
           memory: 2G
+  deploy-payloads-init:
+    image: mongo:7
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      MONGO_ROOT_USER: ${MONGO_ROOT_USER:-engram_admin}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD must be set}
+      HOME: /tmp
+    volumes:
+    - ./schemas/deploy-payload-mongo.schema.json:/deploy-payloads-schema.json:ro
+    - ./bin/deploy-payloads-validator.mongo.js:/apply-validator.js:ro
+    entrypoint:
+    - sh
+    - -c
+    - 'export MONGO_QUERY_SCHEMA="$$(cat /deploy-payloads-schema.json)"
+
+      mongosh "mongodb://$${MONGO_ROOT_USER}:$${MONGO_ROOT_PASSWORD}@mongodb:27017/personaforge?authSource=admin" --quiet /apply-validator.js
+
+      '
+    restart: 'no'
+    networks:
+    - backend
+    security_opt:
+    - no-new-privileges:true
+    cap_drop:
+    - ALL
   forge-web:
     command:
     - python
@@ -46,8 +73,6 @@ services:
       PERSONAFORGE_WEB_PORT: '8200'
       MONGO_URI: mongodb://${MONGO_ROOT_USER:-engram_admin}:${MONGO_ROOT_PASSWORD}@mongodb:27017/personaforge?authSource=admin
       MONGO_DB: personaforge
-      HIVEMIND_URL: http://fleet-manager:4000
-      HIVEMIND_RAVEN_TOKEN: ${HIVEMIND_RAVEN_TOKEN:-}
       FORGE_WEB_ADMIN_TOKEN: ${FORGE_WEB_ADMIN_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
