@@ -1023,7 +1023,7 @@ healthcheck_port_for_svc() {
   esac
 }
 
-smoke_tier_1() {  # healthcheck: HTTP /health returns 200 within 60s
+smoke_tier_1() {  # healthcheck: HTTP /health returns 200 within the budget
   local svc="$1"
   local port
   port=$(healthcheck_port_for_svc "$svc")
@@ -1031,6 +1031,36 @@ smoke_tier_1() {  # healthcheck: HTTP /health returns 200 within 60s
     log warn "no healthcheck port known for $svc; tier 1 cannot run, treating as pass"
     return 0
   fi
+
+  # nooscope: probe from the HOST, not in-container (). Its image is
+  # nginx-unprivileged:alpine with `apk del curl` (curl dropped for CVEs), so the
+  # in-container `curl` probe below can NEVER succeed for it — it timed out every
+  # deploy and was swallowed by the non-gating flag, so the check never actually
+  # validated nooscope. nooscope publishes its port to the host and the wrapper
+  # host has curl (required_deps), so host-probe the published binding instead.
+  # Longer budget: nooscope's entrypoint waits up to 90s for forge-web's /scions
+  # roster before nginx (and /health) come up (ROSTER_BOOT_BUDGET), which exceeds
+  # the 60s used for the always-listening API services.
+  if [[ "$svc" == "nooscope" ]]; then
+    local hostbind deadline=$(( SECONDS + 100 ))
+    hostbind=$(docker compose "${compose_files[@]}" port "$svc" "$port" 2>/dev/null | head -1)
+    # `docker compose port` reports the bind address, which is 0.0.0.0 when
+    # published on all interfaces. curl treats 0.0.0.0 as loopback on Linux, but
+    # don't lean on that quirk — normalise to 127.0.0.1 for an explicit connect.
+    hostbind="${hostbind/0.0.0.0/127.0.0.1}"
+    if [[ -z "$hostbind" ]]; then
+      log warn "nooscope publishes no host port for ${port}; tier 1 cannot host-probe, treating as pass"
+      return 0
+    fi
+    while (( SECONDS < deadline )); do
+      if curl -fsSL -o /dev/null -w '%{http_code}' "http://${hostbind}/health" 2>/dev/null | grep -q 200; then
+        return 0
+      fi
+      sleep 2
+    done
+    return 1
+  fi
+
   local deadline=$(( SECONDS + 60 ))
   while (( SECONDS < deadline )); do
     # -L: follow redirects and judge the FINAL status. forge-web v0.11.0's
@@ -1053,13 +1083,16 @@ smoke_failed=false
 failed_component=""
 
 # A smoke failure on a NON-GATING component records + warns but never rolls the
-# bundle back. nooscope is non-gating (): it is a stateless,
-# read-only viewer whose boot hard-depends on forge-web's /scions roster (its
-# entrypoint exit-1s if the roster fetch fails), so during a deploy window —
-# when forge-web is itself being recreated — nooscope reliably false-negatives
-# its healthcheck. A graph viewer that can't reach a still-warming substrate
-# must not veto a brain+runtime upgrade that otherwise passed. Gating components
-# (engram brain, forge runtime + substrate) still roll back on failure.
+# bundle back. nooscope is non-gating (): a stateless, read-only
+# viewer must not veto a brain+runtime upgrade that otherwise passed. It stays
+# non-gating as a backstop even now that its tier-1 probe actually works
+# (host-side; see smoke_tier_1). Historically its "failures" were NOT a
+# warming-substrate race but a dead probe — the wrapper exec'd `curl` inside the
+# nooscope image, which has curl stripped for CVEs, so the check timed out every
+# deploy regardless of nooscope's health. Even a genuinely still-warming viewer
+# (its entrypoint waits up to 90s for forge-web's roster, then degraded-boots per
+# ) shouldn't roll back a good upgrade. Gating components (engram
+# brain, forge runtime + substrate) still roll back on failure.
 smoke_is_gating() {
   case "$1" in
     nooscope) return 1 ;;
