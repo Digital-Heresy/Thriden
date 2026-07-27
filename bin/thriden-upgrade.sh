@@ -103,17 +103,25 @@ if sops -d "$STACK_ENV" 2>/dev/null \
   echo "         stack.enc.env version pins." >&2
 fi
 
-# ── 5. Substrate: pull + recreate forge-web / nooscope ───────────────────────
+# ── 5. Substrate: pull + recreate forge-web / nooscope / docker-socket-proxy ─
 # Host-short resolution lives inside compose-pull now (bin/thriden-host-short.lib.sh);
 # THRIDEN_HOST_SHORT is still honored via that chain.
 echo ">> pulling substrate images ..." >&2
 bin/thriden-compose-pull.sh
-echo ">> recreating substrate (forge-web, nooscope) ..." >&2
+echo ">> recreating substrate (forge-web, nooscope, docker-socket-proxy) ..." >&2
 # This file set is base+prod only — the per-Scion forge-<short>/engram-<short>
 # drop-ins are recreated separately below, so compose would flag them as
 # orphans. Suppress that warning (COMPOSE_IGNORE_ORPHANS) rather than pass
 # --remove-orphans, which would TEAR DOWN the running Scion runtimes.
-COMPOSE_IGNORE_ORPHANS=true sops exec-env "$STACK_ENV" "$BASE_COMPOSE up -d forge-web nooscope"
+# docker-socket-proxy is in this list because compose-pull above fetches every
+# service's image with no filter, so a SOCKET_PROXY_VERSION bump WOULD land in
+# the local cache and then never be applied -- the running proxy would sit on
+# the old image while `deploy/versions.env` and the release notes both claimed
+# the base had been refreshed. That silent no-op defeats the weekly-rebuild
+# freshness model the vendored image exists for (). It is safe to
+# recreate unconditionally: the proxy is stateless, holds no volumes beyond the
+# :ro docker socket, and forge-web reconnects on its next request.
+COMPOSE_IGNORE_ORPHANS=true sops exec-env "$STACK_ENV" "$BASE_COMPOSE up -d forge-web nooscope docker-socket-proxy"
 
 # ── 6. Per-Scion runtime: re-run scion-up (binding-safe) for each drop-in ────
 shopt -s nullglob

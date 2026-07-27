@@ -2,7 +2,7 @@
 services:
 
   forge-web:
-    image: ghcr.io/digital-heresy/forge:${FORGE_VERSION:-v0.17.0}
+    image: ghcr.io/digital-heresy/forge:${FORGE_VERSION:-v0.18.0}
     pull_policy: missing
     ports: !override
       - "0.0.0.0:8200:8200"
@@ -17,7 +17,7 @@ services:
       - proxy-net
 
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:v0.4.2
+    image: ghcr.io/digital-heresy/thriden-socket-proxy:${SOCKET_PROXY_VERSION:-2026.07.27}
     environment:
       CONTAINERS: 1
       POST: 0
@@ -32,7 +32,7 @@ services:
       - ALL
 
   nooscope:
-    image: ghcr.io/digital-heresy/nooscope:${NOOSCOPE_VERSION:-v0.5.0}
+    image: ghcr.io/digital-heresy/nooscope:${NOOSCOPE_VERSION:-v0.6.0}
     pull_policy: missing
     ports: !override
       - "0.0.0.0:8080:8080"
