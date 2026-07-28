@@ -23,6 +23,9 @@
 #   1. Host-short resolves (which chain step matched; warn if fragile).
 #   2. secrets/prod/{stack,hosts/<short>/host}.enc.env decrypt with the age key.
 #   3. GHCR pull credential works (login/logout round-trip, isolated config).
+#   3b. That credential is actually authorized on EVERY pinned image. GHCR
+#       access is per-package, so a live PAT missing ONE package's grant passes
+#       check 3 and still cannot deploy ().
 #   4. sops version >= 3.9 (the wrapper's rollback 'unset' path needs it).
 #   5. deploy_payloads validator present AND current vs the shipped schema.
 #   6. thriden-deploy-dispatch.timer installed + enabled + last run clean.
@@ -202,30 +205,170 @@ check_secrets_decrypt() {
   fi
 }
 
-# ── Check 3 — GHCR pull credential round-trips ─────────────────────────────
+# ── Check 3 — GHCR pull credential + per-package pull authorization ────────
+# TWO different failures hide behind one symptom here, and telling them apart
+# is the entire point of this check:
+#
+#   3   — is the PAT itself alive?          (`docker login` round-trip)
+#   3b  — may this PAT pull EACH pinned image?
+#
+# GHCR authorization is PER-PACKAGE. `docker login` succeeds for any live token
+# carrying read:packages and says NOTHING about which packages it may actually
+# fetch. So a PAT missing the grant on ONE package sails through check 3 and
+# then dies mid-`thriden-upgrade.sh` on a raw `denied` — which reads as "my
+# token expired" and sends the operator to rotate a token that was never the
+# problem. Check 3's own fix text used to say exactly that, making a green
+# doctor actively misleading.
+#
+# This is not hypothetical: it is the failure mode built into vendoring the
+# socket proxy (). A brand-new private package does NOT inherit
+# the grants its siblings already carry, so on the day compose repinned to
+# `thriden-socket-proxy` every participant PAT could still pull
+# engram/forge/nooscope and not the proxy. 3b names that cause out loud.
 check_ghcr() {
   if [[ "$DOCTOR_HOST_DECRYPT" != "ok" ]]; then
     report WARN "3. GHCR pull credential" \
       "skipped: host.enc.env did not decrypt (see check 2)" \
       "fix check 2 first, then re-run"
+    report WARN "3b. GHCR per-package pull authorization" \
+      "skipped: host.enc.env did not decrypt (see check 2)" \
+      "fix check 2 first, then re-run"
     return
   fi
+
+  # Which image refs would a real pull actually fetch? deploy/versions.env is
+  # the source of truth, but a legacy *_VERSION still pinned in stack.enc.env
+  # shadows it (that is check 8) — and we are ALREADY wrapped in that env, so
+  # an inherited value wins below exactly as it wins for `docker compose pull`.
+  # Probing the tag that would really be fetched is the only useful probe.
+  local vfile="deploy/versions.env" f_forge="" f_noo="" f_sock="" f_engram="" f_runtime=""
+  if [[ -f "$vfile" ]]; then
+    f_forge="$(sed -n 's/^[[:space:]]*FORGE_VERSION=//p'         "$vfile" | tail -n1)"
+    f_noo="$(sed   -n 's/^[[:space:]]*NOOSCOPE_VERSION=//p'      "$vfile" | tail -n1)"
+    f_sock="$(sed  -n 's/^[[:space:]]*SOCKET_PROXY_VERSION=//p'  "$vfile" | tail -n1)"
+    f_engram="$(sed -n 's/^[[:space:]]*ENGRAM_VERSION=//p'       "$vfile" | tail -n1)"
+    f_runtime="$(sed -n 's/^[[:space:]]*FORGE_RUNTIME_VERSION=//p' "$vfile" | tail -n1)"
+  fi
+  local t_forge="${FORGE_VERSION:-$f_forge}"       t_noo="${NOOSCOPE_VERSION:-$f_noo}"
+  local t_sock="${SOCKET_PROXY_VERSION:-$f_sock}"  t_engram="${ENGRAM_VERSION:-$f_engram}"
+  local t_runtime="${FORGE_RUNTIME_VERSION:-$f_runtime}"
+
+  # One entry per PACKAGE (that is the ACL unit). forge-runtime rides the same
+  # `forge` package, so it is added only when its tag differs — then it tests a
+  # tag, not an ACL, and a bad version pin is worth catching too.
+  local -a refs=()
+  [[ -n "$t_engram"  ]] && refs+=("ghcr.io/digital-heresy/engram:$t_engram")
+  [[ -n "$t_forge"   ]] && refs+=("ghcr.io/digital-heresy/forge:$t_forge")
+  [[ -n "$t_noo"     ]] && refs+=("ghcr.io/digital-heresy/nooscope:$t_noo")
+  [[ -n "$t_sock"    ]] && refs+=("ghcr.io/digital-heresy/thriden-socket-proxy:$t_sock")
+  [[ -n "$t_runtime" && "$t_runtime" != "$t_forge" ]] && \
+    refs+=("ghcr.io/digital-heresy/forge:$t_runtime")
+
   # Isolated DOCKER_CONFIG so the probe never persists a credential in the
   # operator's real docker config (same discipline as thriden-compose-pull.sh).
   local cfg; cfg="$(pwd)/.docker-doctor"
   install -d -m 0700 "$cfg"
   export DOCKER_CONFIG="$cfg"
-  if sops exec-env "$host_env" \
-       'printf %s "${GHCR_PULL_TOKEN:?}" | docker login ghcr.io -u "${GHCR_PULL_USER:?}" --password-stdin >/dev/null 2>&1' \
-       >/dev/null 2>&1; then
-    docker logout ghcr.io >/dev/null 2>&1 || true
-    report PASS "3. GHCR pull credential" "docker login ghcr.io succeeded (credential valid)"
+
+  # Inner script in a tempfile, per thriden-compose-pull.sh note 1: sops
+  # exec-env takes ONE sh-command string, and the ref list must cross as
+  # environment data rather than be interpolated into that string (injection
+  # sink). The EXIT trap closes the credential window before sops tears the
+  # env down. Output is one `ref<TAB>verdict<TAB>detail` line per ref, plus a
+  # leading `login<TAB>ok|fail` line, so nothing but a verdict escapes the
+  # wrap — the token itself never reaches this outer scope.
+  local inner; inner="$(mktemp "${TMPDIR:-/tmp}/thriden-doctor-ghcr.XXXXXX.sh")"
+  local out; out="$(mktemp "${TMPDIR:-/tmp}/thriden-doctor-ghcr-out.XXXXXX")"
+  cat > "$inner" <<'GHCR_EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+# `docker manifest` is gated behind the experimental CLI flag on older Docker
+# releases and unconditional on newer ones; setting this is a no-op on new and
+# the enabler on old. We use manifest-inspect rather than a raw registry token
+# dance so the credential stays inside docker's own auth handling.
+export DOCKER_CLI_EXPERIMENTAL=enabled
+if ! printf %s "${GHCR_PULL_TOKEN:?}" \
+     | docker login ghcr.io -u "${GHCR_PULL_USER:?}" --password-stdin >/dev/null 2>&1; then
+  printf 'login\tfail\t\n'
+  exit 0
+fi
+printf 'login\tok\t\n'
+mapfile -t _refs <<< "${THRIDEN_PROBE_REFS:-}"
+for r in "${_refs[@]}"; do
+  [[ -n "$r" ]] || continue
+  if err="$(docker manifest inspect "$r" 2>&1 >/dev/null)"; then
+    printf '%s\tok\t\n' "$r"
+    continue
+  fi
+  # Classify on the registry's own words. `denied`/`unauthorized` on a token
+  # that JUST logged in successfully means the ACL, not the credential.
+  low="$(printf '%s' "$err" | tr '[:upper:]' '[:lower:]' | tr '\n' ' ')"
+  case "$low" in
+    *denied*|*unauthorized*|*forbidden*|*"insufficient scope"*) v=denied ;;
+    *"manifest unknown"*|*"not found"*|*"no such manifest"*)    v=notag  ;;
+    *"is not a docker command"*|*"unknown command"*)            v=nocli  ;;
+    *)                                                          v=error  ;;
+  esac
+  printf '%s\t%s\t%s\n' "$r" "$v" "${low:0:160}"
+done
+GHCR_EOF
+  chmod +x "$inner"
+
+  THRIDEN_PROBE_REFS="$(printf '%s\n' "${refs[@]}")" \
+    sops exec-env "$host_env" "$inner" >"$out" 2>/dev/null || true
+
+  local login_state; login_state="$(sed -n 's/^login\t\([^\t]*\).*/\1/p' "$out" | head -n1)"
+  if [[ "$login_state" == "ok" ]]; then
+    report PASS "3. GHCR pull credential" "docker login ghcr.io succeeded (credential is live)"
   else
-    docker logout ghcr.io >/dev/null 2>&1 || true
     report FAIL "3. GHCR pull credential" \
       "docker login ghcr.io failed with the token in host.enc.env" \
-      "your GHCR PAT may be expired (90-day rotation). Drop the new value into $host_env, sops -e -i, re-run. secrets-setup.md; beta-onboarding.md § 9"
+      "the PAT itself is dead — most often the 90-day expiry. Drop the new value into $host_env, sops -e -i, re-run. secrets-setup.md; beta-onboarding.md § 9"
+    # A dead credential makes every per-package verdict meaningless.
+    report WARN "3b. GHCR per-package pull authorization" \
+      "skipped: the credential did not log in (see check 3)" \
+      "fix check 3 first, then re-run"
+    rm -f "$inner" "$out" 2>/dev/null || true
+    rm -rf "$cfg" 2>/dev/null || true
+    unset DOCKER_CONFIG
+    return
   fi
+
+  local denied="" notag="" other="" nocli=0 okn=0 deniedn=0 ref verdict detail
+  while IFS=$'\t' read -r ref verdict detail; do
+    [[ -n "$ref" && "$ref" != "login" ]] || continue
+    case "$verdict" in
+      ok)     okn=$((okn+1)) ;;
+      denied) denied+="          $ref"$'\n'; deniedn=$((deniedn+1)) ;;
+      notag)  notag+="          $ref"$'\n' ;;
+      nocli)  nocli=1 ;;
+      *)      other+="          $ref  ($detail)"$'\n' ;;
+    esac
+  done < "$out"
+
+  if (( nocli )); then
+    report WARN "3b. GHCR per-package pull authorization" \
+      "unverifiable: this docker CLI has no usable 'docker manifest inspect'" \
+      "upgrade docker, or prove it by hand: bin/thriden-compose-pull.sh (a 'denied' on ONE image is a package grant, not an expired token — secrets-ops.md § 6b.5.1)"
+  elif [[ -n "$denied" ]]; then
+    report FAIL "3b. GHCR per-package pull authorization" \
+      "the credential is valid but the registry REFUSES $deniedn of $((okn+deniedn)) pinned image(s):"$'\n'"$(printf '%s' "$denied")" \
+      "this is a missing package grant, NOT an expired token — do not rotate the PAT. The operator must grant the pulling account Read on each package listed above (Org -> Packages -> <pkg> -> Settings -> Manage access). secrets-ops.md § 6b.5.1 step 2"
+  elif [[ -n "$notag" ]]; then
+    report FAIL "3b. GHCR per-package pull authorization" \
+      "authorized, but the pinned tag does not exist in the registry:"$'\n'"$(printf '%s' "$notag")" \
+      "a bad version pin, not an access problem. Reconcile deploy/versions.env (and any *_VERSION shadow in stack.enc.env — see check 8) against the published tags"
+  elif [[ -n "$other" ]]; then
+    report WARN "3b. GHCR per-package pull authorization" \
+      "could not reach a verdict for:"$'\n'"$(printf '%s' "$other")" \
+      "usually transient network/registry trouble — re-run. If it persists, prove it by hand with bin/thriden-compose-pull.sh"
+  else
+    report PASS "3b. GHCR per-package pull authorization" \
+      "all $okn pinned image(s) are pullable with this credential"
+  fi
+
+  rm -f "$inner" "$out" 2>/dev/null || true
   rm -rf "$cfg" 2>/dev/null || true
   unset DOCKER_CONFIG
 }

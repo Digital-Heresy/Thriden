@@ -48,10 +48,33 @@ if [ "$(id -un)" != "$DEPLOY_USER" ]; then
   exec sudo -u "$DEPLOY_USER" -H "$0" "$@"
 fi
 
+# Resolve our OWN absolute path while we are still in the invocation cwd, before
+# the `cd` below. The step-1b self-update check re-execs this path, and it has to
+# survive every invocation form we support: a relative `bin/thriden-upgrade.sh`,
+# an absolute `/srv/thriden/bin/thriden-upgrade.sh`, and the `sudo -u deploy`
+# self-elevation above (which passes "$0" through unchanged).
+SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
+
 cd "$STACK_DIR"
 proj="${COMPOSE_PROJECT_NAME:-$(basename "$STACK_DIR")}"
 
 # ── 1. Pull the recipe (versions.env + compose defaults travel with it) ──────
+# Hash ourselves BEFORE anything that can rewrite the working tree. That means
+# before the detached-HEAD checkout below, not merely before the pull: on a host
+# recovering from a scheduled deploy, HEAD sits detached at an OLD release tag,
+# so `git checkout main` is itself very likely to be what replaces this script —
+# and if the subsequent pull is then a no-op, a hash taken after the checkout
+# would compare equal and the guard would miss the change entirely. That is the
+# exact bug this guard exists to prevent, one step earlier than it was watching.
+self_before="$(sha256sum "$SELF" 2>/dev/null | cut -d' ' -f1 || true)"
+if [ -z "$self_before" ]; then
+  # Never silently degrade to "assume unchanged" -- that is fail-OPEN, and it
+  # reintroduces precisely the staleness this guard closes. Not fatal (a broken
+  # self-hash is no reason to abort a working upgrade), but it must be visible.
+  echo ">> WARN: could not hash $SELF -- self-update detection is DISABLED for" >&2
+  echo "         this run. If this release changes the deploy scripts, re-run." >&2
+fi
+
 # A prior scheduled deploy (bin/thriden-deploy-payload.sh self-sync, )
 # leaves HEAD detached at a release tag; `git pull --ff-only` can't fast-forward a
 # detached HEAD. Re-attach to main first — but only when detached, so an operator
@@ -62,6 +85,44 @@ if ! git symbolic-ref -q HEAD >/dev/null; then
 fi
 echo ">> git pull --ff-only ..." >&2
 git pull --ff-only
+
+# ── 1b. Self-update guard: re-exec if the pull replaced THIS script ─────────
+# The pull carries a new copy of this very file. Without this block bash keeps
+# executing the copy it already loaded, which is wrong in two ways ():
+#
+#   1. Any fix to this script lands ONE RUN LATE. Seen live on Cairn upgrading
+#      thriden-v0.15.0 -> v0.16.0: the run that delivered "also recreate
+#      docker-socket-proxy" pulled the new image, upgraded everything else, and
+#      left the proxy on the old container -- while printing "upgrade complete".
+#      Silently doing less than the release claimed is the dangerous shape,
+#      because the operator gets no signal anything was missed.
+#   2. Worse, bash reads a script INCREMENTALLY, tracking a byte offset into the
+#      open file. Replacing that file mid-run can make the next read land
+#      mid-statement. We have not been bitten, but the failure would be arbitrary
+#      and unreproducible, in the script that upgrades production.
+#
+# Re-exec IMMEDIATELY so as little of the stale body runs as possible. The guard
+# env var makes it at most once: if a second change appears within the same run
+# something is wrong (a moving branch, a concurrent deploy), and looping forever
+# on a production host is worse than finishing on a known-current copy.
+if [ -n "$self_before" ]; then
+  self_after="$(sha256sum "$SELF" 2>/dev/null | cut -d' ' -f1 || true)"
+  if [ -z "$self_after" ]; then
+    echo ">> WARN: could not re-hash $SELF after the pull -- cannot tell whether" >&2
+    echo "         this script changed. If this release touches the deploy" >&2
+    echo "         scripts, re-run to be sure the new logic applied." >&2
+  fi
+  if [ -n "$self_after" ] && [ "$self_before" != "$self_after" ]; then
+    if [ -n "${THRIDEN_UPGRADE_REEXECED:-}" ]; then
+      echo ">> WARN: $SELF changed again after re-exec -- continuing on the" >&2
+      echo "         current copy rather than looping. Re-run to be certain." >&2
+    else
+      echo ">> the pull updated this script -- re-execing the new copy ..." >&2
+      export THRIDEN_UPGRADE_REEXECED=1
+      exec "$SELF" "$@"
+    fi
+  fi
+fi
 
 # ── 2. Load the pinned umbrella versions ─────────────────────────────────────
 if [ ! -f "$VERSIONS_FILE" ]; then

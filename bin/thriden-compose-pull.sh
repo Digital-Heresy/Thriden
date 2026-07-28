@@ -174,4 +174,29 @@ chmod +x "$inner"
 # Both $stack_env and $inner are script-controlled paths (no caller
 # input), so single-quoting them inside the sh -c string is sufficient
 # to keep this side of the call free of injection sinks.
-sops exec-env "$stack_env" "sops exec-env '$host_env' '$inner'"
+pull_rc=0
+sops exec-env "$stack_env" "sops exec-env '$host_env' '$inner'" || pull_rc=$?
+
+if [[ $pull_rc -ne 0 ]]; then
+  # A pull that dies on ONE image looks identical to a dead token from here,
+  # and docker's own word for both is "denied" -- so the honest failure is to
+  # stop (which we do: this runs BEFORE any `up -d`, so nothing was recreated
+  # and the stack keeps serving its current images) and then point at the tool
+  # that can tell the two apart. Deliberately NOT a fallback to some other
+  # image: silently substituting a third-party socket proxy for the vendored
+  # one would undo the trust-boundary this stack was changed to get
+  # (), and would do it invisibly, which is worse than stopping.
+  cat >&2 <<EOF
+
+ERROR: image pull failed — NOTHING was recreated, the running stack is untouched.
+
+  A 'denied'/'unauthorized' on SOME images while others succeed is a missing
+  per-package grant on the pulling account, NOT an expired token. GHCR access
+  is granted per package, and a newly published package does not inherit the
+  grants its siblings carry. Rotating the PAT will not fix that.
+
+  Tell the two apart:  bin/thriden-doctor.sh   (checks 3 and 3b)
+  Operator remedy:     docs/secrets-ops.md § 6b.5.1 step 2 (grant Read per package)
+EOF
+  exit "$pull_rc"
+fi
