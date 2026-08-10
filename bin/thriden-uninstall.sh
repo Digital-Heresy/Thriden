@@ -40,7 +40,32 @@ set -euo pipefail
 
 STACK_DIR="${THRIDEN_STACK_DIR:-/srv/thriden}"
 DEPLOY_USER="${THRIDEN_DEPLOY_USER:-deploy}"
-proj="${COMPOSE_PROJECT_NAME:-$(basename "$STACK_DIR")}"
+# Resolve the compose project name; do NOT just guess it from the directory.
+# Compose LOWERCASES the project name and strips characters outside
+# [a-z0-9_-], so basename "$STACK_DIR" is wrong for any capitalised or dotted
+# directory -- and here that is not a cosmetic error. Verified on a dir named
+# MindHive: the label filter matched 0 containers and the volume prefix 0
+# volumes, against a real 12 and 8. This script would have reported success
+# while leaving every Scion volume, i.e. every brain, on disk. Telling someone
+# their data is deleted when it is not is the worst failure this repo can have
+# ( sweep).
+#
+# Authoritative source first: ask an existing container what project it
+# belongs to. Fall back to the normalised basename, and SAY it was a guess.
+proj_guess="$(basename "$STACK_DIR" | tr "[:upper:]" "[:lower:]" | tr -cd "a-z0-9_-")"
+proj="${COMPOSE_PROJECT_NAME:-}"
+proj_source="COMPOSE_PROJECT_NAME"
+if [ -z "$proj" ]; then
+  _cid="$(docker ps -aq --filter "label=com.docker.compose.project.working_dir=$STACK_DIR" 2>/dev/null | head -1)"
+  if [ -n "$_cid" ]; then
+    proj="$(docker inspect -f "{{index .Config.Labels \"com.docker.compose.project\"}}" "$_cid" 2>/dev/null || true)"
+    proj_source="container label"
+  fi
+fi
+if [ -z "$proj" ]; then
+  proj="$proj_guess"
+  proj_source="guessed from directory name"
+fi
 
 DRY_RUN=0; ASSUME_YES=0; KEEP_IMAGES=0
 for arg in "$@"; do
@@ -66,7 +91,7 @@ containers="$(docker ps -aq --filter "label=com.docker.compose.project=${proj}" 
 volumes="$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E "^${proj}_" || true)"
 images="$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '^ghcr\.io/digital-heresy/' || true)"
 
-echo ">> Thriden uninstall — compose project '${proj}' on $(hostname)" >&2
+echo ">> Thriden uninstall — compose project '${proj}' (${proj_source}) on $(hostname)" >&2
 echo "   containers=$(count "$containers")  volumes=$(count "$volumes")  DH-images=$(count "$images")" >&2
 [ -n "$volumes" ] && printf '   - volume %s\n' $volumes >&2 || true
 [ -n "$images" ] && printf '   - image  %s\n' $images >&2 || true
@@ -77,6 +102,16 @@ if [ "$DRY_RUN" = 1 ]; then
 fi
 
 if [ -z "${containers}${volumes}${images}" ]; then
+  # "Found nothing" and "there is nothing" are different claims. If the project
+  # name was guessed, an empty result may just mean we looked under the wrong
+  # name -- and reporting that as clean is how a brain survives an uninstall.
+  if [ "$proj_source" = "guessed from directory name" ]      && [ -n "$(docker ps -aq --filter label=com.docker.compose.project 2>/dev/null | head -1)" ]; then
+    echo ">> nothing matched project '${proj}', but OTHER compose projects exist on this host." >&2
+    echo "   The name was guessed from the directory, so this may be the wrong one." >&2
+    echo "   Confirm before believing it: docker ps -a --format '{{.Label \"com.docker.compose.project\"}}' | sort -u" >&2
+    echo "   Then re-run with: COMPOSE_PROJECT_NAME=<name> $0 $*" >&2
+    exit 1
+  fi
   echo ">> already clean — nothing to do." >&2
   exit 0
 fi

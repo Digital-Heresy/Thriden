@@ -56,7 +56,7 @@ fi
 SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
 
 cd "$STACK_DIR"
-proj="${COMPOSE_PROJECT_NAME:-$(basename "$STACK_DIR")}"
+# (compose project name is no longer guessed -- see the brain-swap guard below)
 
 # ── 1. Pull the recipe (versions.env + compose defaults travel with it) ──────
 # Hash ourselves BEFORE anything that can rewrite the working tree. That means
@@ -135,8 +135,26 @@ set -a; . "./$VERSIONS_FILE"; set +a
 echo ">> target: forge=$FORGE_VERSION  forge-runtime=$FORGE_RUNTIME_VERSION  engram=$ENGRAM_VERSION  nooscope=$NOOSCOPE_VERSION" >&2
 
 # ── 3. Brain-swap guard: refuse to swap a running brain synchronously ────────
-running_engram_tags="$(docker ps --filter "name=${proj}-engram-" --format '{{.Image}}' \
-  | sed -n 's#.*/engram:##p' | sort -u)"
+# Ask for engram IMAGES, not for containers whose NAME starts with a guessed
+# project prefix. The old form filtered on "${proj}-engram-" where proj was
+# basename "$STACK_DIR" -- but compose LOWERCASES the project name, so on a
+# stack dir with any capital letter the filter matched nothing and this guard
+# silently did not run. Verified: a dir named MindHive yields containers named
+# mindhive-engram-*, and the filter found 0 of 3. A safety guard that fails
+# OPEN when it cannot see is worse than no guard, because the abort message is
+# the only thing standing between an operator and an unprotected brain swap
+# (no pre-flight export, no post-swap canary, no auto-revert). Matching on the
+# image ref needs no project name at all ( sweep).
+if ! docker_ps_out="$(docker ps --format '{{.Image}}' 2>&1)"; then
+  cat >&2 <<EOF
+ABORT: cannot list running containers, so the brain-swap guard cannot verify
+       what is running. Refusing to continue rather than proceed blind.
+       docker said: $docker_ps_out
+EOF
+  exit 1
+fi
+running_engram_tags="$(printf '%s
+' "$docker_ps_out" | sed -n 's#.*/engram:##p' | sort -u)"
 if [ -n "$running_engram_tags" ]; then
   while IFS= read -r tag; do
     [ -n "$tag" ] || continue

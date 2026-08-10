@@ -115,12 +115,20 @@ else
   compose_files=(-f docker-compose.yml -f compose.prod.yml)
 fi
 
-MONGO_QUERY_SCHEMA="$schema_inner" \
+# --eval, NOT piped stdin. Feeding the script to mongosh's stdin puts it in
+# REPL mode, so it echoes a `personaforge>` prompt per line and `| | |`
+# continuation markers around every block -- forty lines of noise with the two
+# lines that matter ("collMod result", "validator confirmed") buried in it. The
+# first beta participant reasonably asked whether it was broken. It was not,
+# but a participant cannot tell success from failure in that, which makes it a
+# real defect rather than a cosmetic one. bin/thriden-doctor.sh already learned
+# this (see doctor_mongo_eval); same fix here. The schema and the script both
+# travel in the environment, never on the command line.
 docker compose "${compose_files[@]}" exec -T \
   -e MONGO_QUERY_SCHEMA="$schema_inner" \
+  -e MONGO_QUERY_JS="$(cat "$js_file")" \
   mongodb \
-  sh -c 'mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/personaforge?authSource=admin" --quiet' \
-  < "$js_file"
+  sh -c 'mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/personaforge?authSource=admin" --quiet --eval "$MONGO_QUERY_JS"'
 
 # ── Pin the host short name (host-short resolution, xluj integration bug #3) ──
 # Unattended paths (the wake-path dispatcher -> wrapper) can't pass -h, so pin

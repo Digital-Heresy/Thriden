@@ -20,6 +20,8 @@
 # "All green" (zero WARN, zero FAIL) = the install is golden.
 #
 # Checks (bean ):
+#   0. Host command-line deps (docker/jq/curl/git) are on PATH. Without jq the
+#      checks below misread rather than fail loudly, so this one runs first.
 #   1. Host-short resolves (which chain step matched; warn if fragile).
 #   2. secrets/prod/{stack,hosts/<short>/host}.enc.env decrypt with the age key.
 #   3. GHCR pull credential works (login/logout round-trip, isolated config).
@@ -29,7 +31,10 @@
 #   4. sops version >= 3.9 (the wrapper's rollback 'unset' path needs it).
 #   5. deploy_payloads validator present AND current vs the shipped schema.
 #   6. thriden-deploy-dispatch.timer installed + enabled + last run clean.
-#   7. Per Scion drop-in: engram/forge running+healthy, canary fresh, soul bound.
+#   7. Per Scion drop-in: engram/forge running+healthy, canary fresh, soul bound,
+#      and the brain can actually EMBED -- a Voyage key that is configured but
+#      REJECTED passes every other check while leaving the Scion unable to form
+#      or recall a single memory ().
 #   8. No *_VERSION shadows in stack.enc.env (tpo4 discipline).
 #   9. Tree on a thriden-v* tag or main, clean (no stray files), remote reachable.
 #
@@ -153,6 +158,34 @@ doctor_mongo_eval() {
 
 printf '%s== Thriden doctor ==%s  host-short=%s  stack=%s\n\n' \
   "$C_BOLD" "$C_RESET" "${host_short:-<unresolved>}" "$(pwd)"
+
+# ── Check 0 — host command-line dependencies ───────────────────────────────
+# The deploy path shells out to these; a fresh Ubuntu/WSL image ships none of
+# them. `jq` in particular used to fail INVISIBLY here: with it absent, check 5
+# compared two empty strings ("stale validator") and check 7 read empty state
+# out of `compose ps --format json` and declared healthy containers "not
+# created" — i.e. the doctor's own report was the misdiagnosis (Alex, b5d5
+# live run). Report the missing tool itself, and have the checks that need it
+# skip rather than invent a finding.
+have_jq=0; command -v jq >/dev/null 2>&1 && have_jq=1
+check_host_deps() {
+  local t missing=() apt=()
+  for t in docker jq curl git; do
+    command -v "$t" >/dev/null 2>&1 && continue
+    missing+=("$t")
+    # docker is not an apt install on the WSL track — Docker Desktop provides it.
+    [[ "$t" == docker ]] || apt+=("$t")
+  done
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    report PASS "0. Host tools" "docker, jq, curl, git all present"
+    return
+  fi
+  local fix=""
+  [[ ${#apt[@]} -gt 0 ]] && fix="sudo apt update && sudo apt install -y ${apt[*]}. "
+  [[ " ${missing[*]} " == *" docker "* ]] && fix+="docker comes from Docker Desktop's WSL integration (Settings -> Resources -> WSL Integration), not apt. "
+  report FAIL "0. Host tools" "missing from PATH: ${missing[*]}" \
+    "${fix}beta-onboarding.md § 1"
+}
 
 # ── Check 1 — host-short resolves ──────────────────────────────────────────
 check_host_short() {
@@ -404,6 +437,12 @@ check_validator() {
     report WARN "5. deploy_payloads validator" "shipped schema file not found; cannot compare" ""
     return
   fi
+  if (( ! have_jq )); then
+    report WARN "5. deploy_payloads validator" \
+      "skipped: the shipped-vs-live schema comparison needs jq (see check 0)" \
+      "install jq, then re-run"
+    return
+  fi
   local js live want got
   js='const o = db.runCommand({listCollections:1, filter:{name:"deploy_payloads"}}).cursor.firstBatch[0];
 if (!o) { print("__MISSING_COLLECTION__"); quit(0); }
@@ -418,11 +457,11 @@ print(v ? JSON.stringify(v) : "__NO_VALIDATOR__");'
   case "$live" in
     *__MISSING_COLLECTION__*)
       report FAIL "5. deploy_payloads validator" "deploy_payloads collection does not exist" \
-        "the deploy-payloads-init service applies this on 'docker compose up'; recreate it (up -d deploy-payloads-init) or run bin/thriden-deploy-payloads-setup.sh"
+        "apply the validator: bin/thriden-deploy-payloads-setup.sh (it self-wraps under sops). A bare 'docker compose up' will NOT work on a prod-layout host -- compose needs MONGO_ROOT_PASSWORD from the encrypted stack env, so it must be: sops exec-env secrets/prod/stack.enc.env 'docker compose -f docker-compose.yml -f compose.prod.yml up -d deploy-payloads-init'"
       return ;;
     *__NO_VALIDATOR__*)
       report FAIL "5. deploy_payloads validator" "collection exists but carries NO \$jsonSchema validator" \
-        "recreate the deploy-payloads-init service (up -d deploy-payloads-init) or run bin/thriden-deploy-payloads-setup.sh to apply the validator"
+        "apply the validator: bin/thriden-deploy-payloads-setup.sh (it self-wraps under sops). A bare 'docker compose up' will NOT work on a prod-layout host -- compose needs MONGO_ROOT_PASSWORD from the encrypted stack env, so it must be: sops exec-env secrets/prod/stack.enc.env 'docker compose -f docker-compose.yml -f compose.prod.yml up -d deploy-payloads-init'"
       return ;;
   esac
   # Present -> is it current? Compare against the shipped schema, stripped of
@@ -432,9 +471,31 @@ print(v ? JSON.stringify(v) : "__NO_VALIDATOR__");'
   if [[ -n "$got" && "$got" == "$want" ]]; then
     report PASS "5. deploy_payloads validator" "present and matches shipped schema"
   else
+    # Say HOW it differs. "Stale" alone sends the reader to re-run the applier,
+    # and when that does not fix it they have nowhere to go (: a
+    # participant re-applied and got the identical WARN). The key delta tells
+    # "older schema" apart from "the applier and this checker disagree".
+    local delta="" only_shipped="" only_live="" rq_s="" rq_l=""
+    if [[ -n "$got" ]]; then
+      only_shipped="$(comm -23 <(jq -r 'keys[]' <<<"$want" 2>/dev/null | sort) <(jq -r 'keys[]' <<<"$got" 2>/dev/null | sort) | paste -sd, -)"
+      only_live="$(comm -13 <(jq -r 'keys[]' <<<"$want" 2>/dev/null | sort) <(jq -r 'keys[]' <<<"$got" 2>/dev/null | sort) | paste -sd, -)"
+      [[ -n "$only_shipped" ]] && delta+=" Shipped-only keys: $only_shipped."
+      [[ -n "$only_live" ]] && delta+=" Live-only keys: $only_live."
+      if [[ -z "$delta" ]]; then
+        rq_s="$(jq -r '.required // [] | join(",")' <<<"$want" 2>/dev/null)"
+        rq_l="$(jq -r '.required // [] | join(",")' <<<"$got" 2>/dev/null)"
+        if [[ "$rq_s" != "$rq_l" ]]; then
+          delta=" required[] differs -- shipped: [$rq_s]; live: [$rq_l]."
+        else
+          delta=" Same top-level keys and required[]; the difference is nested (a property constraint)."
+        fi
+      fi
+    else
+      delta=" (the live validator did not parse as JSON.)"
+    fi
     report WARN "5. deploy_payloads validator" \
-      "validator present but DIFFERS from schemas/deploy-payload-mongo.schema.json (stale)" \
-      "a 'docker compose up' re-applies it via deploy-payloads-init (self-heals after git pull); or re-run bin/thriden-deploy-payloads-setup.sh"
+      "validator present but DIFFERS from schemas/deploy-payload-mongo.schema.json (stale).${delta}" \
+      "refresh it: bin/thriden-deploy-payloads-setup.sh (it self-wraps under sops). A bare 'docker compose up' will NOT work on a prod-layout host -- compose needs MONGO_ROOT_PASSWORD from the encrypted stack env, so it must be: sops exec-env secrets/prod/stack.enc.env 'docker compose -f docker-compose.yml -f compose.prod.yml up -d deploy-payloads-init'"
   fi
 }
 
@@ -459,8 +520,18 @@ check_dispatch_timer() {
   result="$(systemctl show thriden-deploy-dispatch.service -p Result --value 2>/dev/null || true)"
   exitstatus="$(systemctl show thriden-deploy-dispatch.service -p ExecMainStatus --value 2>/dev/null || true)"
   if [[ "$active" != "active" ]]; then
+    local fix6="systemctl start $unit; check: systemctl status $unit"
+    # 'failed' is not the same as 'stopped', and the difference matters: a unit
+    # that failed once STAYS failed until reset, so this keeps reporting the old
+    # failure after the cause is fixed — which reads as "the fix did not work"
+    # (: a participant fixed the underlying unit, saw the service
+    # start cleanly, and still got this FAIL from a failure minutes earlier).
+    # `start` alone will not clear it.
+    if [[ "$active" == "failed" ]]; then
+      fix6="read WHY first: systemctl status $unit --no-pager -l . Then, once the cause is fixed, clear the latched state — a failed unit stays failed and 'start' alone will not clear it: sudo systemctl reset-failed $unit && sudo systemctl restart $unit"
+    fi
     report FAIL "6. Upgrade dispatcher timer" "$unit enabled but not active (state=$active)" \
-      "systemctl start $unit; check: systemctl status $unit"
+      "$fix6"
     return
   fi
   # The service exits 0 on nothing-to-do, 1 informationally (a wrapper failure /
@@ -487,13 +558,54 @@ check_scions() {
   for f in compose-*.yml; do s="${f#compose-}"; s="${s%.yml}"; scions+=("$s"); done
   shopt -u nullglob
   if [[ ${#scions[@]} -eq 0 ]]; then
-    report WARN "7. Scion health" "no compose-*.yml drop-ins on this host (no Scion provisioned yet)" \
+    # "No drop-ins here" and "no Scion on this host" are different claims, and
+    # conflating them hides a real split brain: a participant's Scion was running
+    # and answering while this check reported nothing provisioned, because the
+    # containers had been brought up from a DIFFERENT clone than the one the
+    # doctor ran in (). The dispatcher points at THIS directory, so
+    # a scheduled upgrade would act on a Scion set it cannot see.
+    #
+    # But "engram container running" alone is not the tell: on a DEV host the
+    # Scions are ordinary services in the base compose (the mirror strips them),
+    # so they run with no drop-in and are perfectly healthy. The discriminator is
+    # whether the base compose itself declares the service -- if it does, this is
+    # a dev box, not a split brain. Getting this wrong would fail every localhost
+    # run, which is how a check earns its way onto the ignore list.
+    # Only trust this when docker actually answers. With Docker Desktop stopped
+    # (or WSL integration off) the `docker` shim prints its "could not be found"
+    # advice to STDOUT, which a naive read would treat as a container name and
+    # report as an orphan -- inventing a split brain out of a stopped daemon.
+    local running known orphans=""
+    if docker info >/dev/null 2>&1; then
+      running="$(docker ps --filter "name=engram-" --format '{{.Names}}' 2>/dev/null                  | grep -E '^[A-Za-z0-9][A-Za-z0-9_.-]*$' || true)"
+    fi
+    if [[ -n "$running" ]]; then
+      known="$(docker compose -f docker-compose.yml config --services 2>/dev/null | grep '^engram-' || true)"
+      local c svc
+      while IFS= read -r c; do
+        [[ -n "$c" ]] || continue
+        # container name is <project>-<service>-<n>; recover the service.
+        svc="$(printf '%s' "$c" | sed -E 's/^.*-(engram-[A-Za-z0-9_-]+)-[0-9]+$//')"
+        grep -qx "$svc" <<<"$known" || orphans+="$c "
+      done <<<"$running"
+    fi
+    if [[ -n "$orphans" ]]; then
+      report FAIL "7. Scion health"         "engram container(s) are RUNNING (${orphans% }) but this stack dir has neither a compose-*.yml drop-in nor a base-compose service for them — they were provisioned from a different directory than $(pwd)"         "you are almost certainly running from a second clone. Find the one that provisioned them (it holds compose-<short>.yml) and use that as your stack dir, or re-render here with bin/thriden-scion-up.sh <scion-id>. Until they agree, upgrades and the dispatcher act on a Scion set this directory cannot see"
+      return
+    fi
+    report WARN "7. Scion health" "no compose-*.yml drop-ins here, and no unaccounted-for engram containers — no Scion provisioned yet" \
       "provision your first Scion: beta-onboarding.md § 7 / runbook-provision-scion.md"
     return
   fi
   if (( ! wrapped )); then
     report WARN "7. Scion health" \
       "found ${#scions[@]} Scion drop-in(s) (${scions[*]}) but skipped: needs stack.enc.env (see check 2)" ""
+    return
+  fi
+  if (( ! have_jq )); then
+    report WARN "7. Scion health" \
+      "found ${#scions[@]} Scion drop-in(s) (${scions[*]}) but skipped: container state + soul binding are read with jq (see check 0)" \
+      "install jq, then re-run — without it this check cannot tell a healthy Scion from a missing one"
     return
   fi
   for s in "${scions[@]}"; do
@@ -518,6 +630,34 @@ check_scions() {
     # Soul binding (instance.json forge_soul_id) on the brain.
     local soul=""
     soul="$(docker compose "${files[@]}" exec -T "$esvc" cat /data/instance.json 2>/dev/null | jq -r '.forge_soul_id // empty' 2>/dev/null)"
+    # Embedding capability (). A brain whose Voyage key is being
+    # REJECTED passes every check above -- containers up, healthy, soul bound,
+    # canary fresh -- and still cannot form or recall a single memory: recall
+    # embeds the query text before the ANN lookup, so every message 500s. That
+    # is the beta participant's incident (), and "all green" said
+    # golden throughout it.
+    #
+    # /admin/embedding is authenticated, so the read happens INSIDE the
+    # container with $ENGRAM_RAVEN_TOKEN, exactly like the canary probe below --
+    # the token never crosses into the host env. It is also O(1), unlike the
+    # same flags on /stats, which walks every node (~1s at 500 nodes and worse
+    # from there); the doctor only pays that scan when it has already decided
+    # to FAIL and wants the pending count for the message.
+    #
+    # A torpid brain 503s here (torpor gates read routes), leaving both values
+    # empty -- so both branches below fall through and the canary clause reports
+    # the torpor, rather than this clause inventing an embedding verdict from a
+    # sleeping brain.
+    local emb emb_code emb_body embed_cfg embed_ok
+    emb="$(docker compose "${files[@]}" exec -T "$esvc" \
+      sh -c 'curl -s -w "\n%{http_code}" -H "Authorization: Bearer $ENGRAM_RAVEN_TOKEN" http://localhost:3030/admin/embedding' 2>/dev/null || true)"
+    emb_code="$(printf '%s' "$emb" | tail -n1)"
+    emb_body="$(printf '%s' "$emb" | sed '$d')"
+    embed_cfg="$(printf '%s' "$emb_body" | jq -r '.voyage_configured // empty' 2>/dev/null)"
+    embed_ok="$(printf '%s' "$emb_body" | jq -r '.embedding_ok // empty' 2>/dev/null)"
+    local embed_why
+    embed_why="$(printf '%s' "$emb_body" | jq -r '.last_error_kind // empty' 2>/dev/null)"
+
     # Canary: 200 fresh, 404 not planted, 503 torpid (planted but asleep).
     local code
     code="$(docker compose "${files[@]}" exec -T "$esvc" \
@@ -532,6 +672,55 @@ check_scions() {
     if [[ -z "$soul" ]]; then
       report FAIL "7. Scion '$s'" "running, but forge_soul_id is EMPTY in /data/instance.json (never fully genesis'd)" \
         "re-provision the Scion soul binding: runbook-provision-scion.md"
+      continue
+    fi
+    # A brain rejecting our credential presents EXACTLY like a brain that cannot
+    # embed: every call fails, the Scion answers nothing, and the containers all
+    # look fine ( raised this from the in-voice side -- 401 is
+    # an operator condition, nothing the human in the room did). Distinguish it
+    # here rather than leaving an "http 401" crumb in the canary clause, since
+    # the remedy is completely different: fix the token, not the Voyage key.
+    if [[ "$emb_code" == "401" || "$emb_code" == "403" ]]; then
+      report FAIL "7. Scion '$s'" \
+        "engram is REJECTING our credential (http $emb_code) — every authenticated call from the runtime fails, so the Scion cannot read or write memory at all. This is a token problem, NOT a provider problem" \
+        "the runtime's ENGRAM_RAVEN_TOKEN and the brain's configured credential disagree. Both come from the Scion's Mongo doc via 'personaforge-admin scion runtime-env' — re-run bin/thriden-scion-up.sh <scion-id> to re-fetch and recreate. Engram logs the rejection to <data_dir>/audit.jsonl as auth_failure/scope_denied if you need to confirm which"
+      continue
+    fi
+    # A brain that cannot embed is useless even though everything above passed,
+    # so this outranks the canary verdict.
+    if [[ "$embed_cfg" == "true" && "$embed_ok" == "false" ]]; then
+      # Only now is the O(N) /stats scan worth it: enrich the failure with how
+      # many memories are sitting unembedded behind the broken key.
+      local pending extra=""
+      pending="$(docker compose "${files[@]}" exec -T "$esvc" \
+        sh -c 'curl -fsS -H "Authorization: Bearer $ENGRAM_RAVEN_TOKEN" http://localhost:3030/stats' 2>/dev/null \
+        | jq -r '.pending_embed_nodes // 0' 2>/dev/null || true)"
+      [[ -n "$pending" && "$pending" != "0" ]] && extra=" $pending memory(ies) are stored but unembedded and NOT searchable."
+      # Say WHICH failure. A rate limit and a rejected key both read as "cannot
+      # embed", but the remedies are opposites — and sending someone to rotate a
+      # key that a 429 has nothing to do with is exactly how the beta
+      # participant's second incident would have been misdiagnosed as a relapse
+      # of the first. Report only what the signal establishes.
+      case "$embed_why" in
+        rate_limit)
+          report FAIL "7. Scion '$s'" \
+            "brain cannot embed — Voyage is RATE LIMITING this account (429), not rejecting the key.${extra} Memory formation and recall fail while it lasts, but nothing is misconfigured" \
+            "Voyage's per-minute caps are tied to your usage tier, and an account with NO PAYMENT METHOD sits below Tier 1 with limits low enough that ordinary Scion traffic trips them. Adding a payment method qualifies you for Tier 1 — your free token grant still applies, so this raises the rate ceiling rather than starting a bill. https://docs.voyageai.com/docs/rate-limits . Do NOT rotate the key; that is a different failure (this check names it 'rejecting the key' when it is)" ;;
+        auth)
+          report FAIL "7. Scion '$s'" \
+            "brain CANNOT EMBED — VOYAGE_API_KEY is configured but the provider is REJECTING it.${extra} This Scion cannot form or recall memories; every message fails with a 500 from /query" \
+            "verify the key (curl -s https://api.voyageai.com/v1/embeddings -H \"Authorization: Bearer \$KEY\" -H 'Content-Type: application/json' -d '{\"input\":[\"t\"],\"model\":\"voyage-3-lite\"}'), fix it in secrets/prod/stack.enc.env, then bin/thriden-scion-up.sh <scion-id> to recreate (a restart will NOT re-read it). Then POST /admin/reindex to re-embed anything stored while it was broken" ;;
+        *)
+          report FAIL "7. Scion '$s'" \
+            "brain cannot embed — the last embedding attempt failed${embed_why:+ ($embed_why)}.${extra} This Scion cannot form or recall memories" \
+            "check the brain's logs for the provider's own error: docker compose ${COMPOSE[*]} -f compose-$s.yml logs --tail 50 $esvc . Then POST /admin/reindex once it is embedding again" ;;
+      esac
+      continue
+    fi
+    if [[ "$embed_cfg" == "false" ]]; then
+      report WARN "7. Scion '$s'" \
+        "no VOYAGE_API_KEY — the brain is running on local hash embeddings; it works, but recall quality is badly degraded" \
+        "set VOYAGE_API_KEY in secrets/prod/stack.enc.env and recreate with bin/thriden-scion-up.sh <scion-id>. beta-onboarding.md § 4"
       continue
     fi
     case "$code" in
@@ -586,7 +775,15 @@ check_tree() {
   # the status chars ('^.[ ?] secrets/') missed exactly that case and turned
   # benign sops diffs into a false FAIL.
   local dirt tracked untracked
-  dirt="$(git status --porcelain 2>/dev/null | grep -vE '^...secrets/' || true)"
+  # Exclude host-local files a correct install is SUPPOSED to have. The mirror
+  # does not ship a .gitignore covering them, so git reports the participant's
+  # own required config as strays — .sops.yaml and .thriden-host-short are
+  # literally created by following the onboarding guide, and compose-<short>.yml
+  # is written by scion-up. Flagging those trains people to ignore this check,
+  # which is the opposite of what it is for ().
+  dirt="$(git status --porcelain 2>/dev/null \
+          | grep -vE '^...(secrets/|\.sops\.yaml|\.thriden-host-short|\.docker/|compose-[A-Za-z0-9._-]+\.yml)' \
+          || true)"
   tracked="$(printf '%s\n' "$dirt" | grep -E '^ ?[MADRCU]' || true)"
   untracked="$(printf '%s\n' "$dirt" | grep -E '^\?\?' || true)"
   if [[ -n "$tracked" ]]; then
@@ -610,6 +807,7 @@ check_tree() {
 }
 
 # ── Run all checks ─────────────────────────────────────────────────────────
+check_host_deps
 check_host_short
 check_secrets_decrypt
 check_ghcr

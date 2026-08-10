@@ -37,7 +37,11 @@ if [ "$(id -un)" != "$DEPLOY_USER" ]; then
 fi
 
 cd "$STACK_DIR"
-proj="${COMPOSE_PROJECT_NAME:-$(basename "$STACK_DIR")}"
+# Compose lowercases the project name and strips characters outside
+# [a-z0-9_-], so a raw basename is wrong for any capitalised directory and the
+# derived container name below never resolves -- the health wait then spins the
+# full 60s and reports state=unknown ( sweep).
+proj="${COMPOSE_PROJECT_NAME:-$(basename "$STACK_DIR" | tr "[:upper:]" "[:lower:]" | tr -cd "a-z0-9_-")}"
 stack_env="secrets/prod/stack.enc.env"
 
 # Pin versions from the non-secret manifest () so a host migrated
@@ -56,7 +60,15 @@ if [ ! -f "$host_env" ]; then
 fi
 
 # Resolve the tag the compose references (defaults to main, like compose.prod.yml).
-ver="$(sops exec-env "$stack_env" "printf '%s' \"\${${ver_var}:-main}\"")"
+# Fail if the decrypt itself fails. An empty read here is indistinguishable
+# from "no pin set", and both land on :main -- so a sops failure would quietly
+# pull main onto a host that had pinned a release. Same shape as the rest of
+# this sweep: an empty capture must not become a value.
+if ! ver="$(sops exec-env "$stack_env" "printf '%s' \"\${${ver_var}:-main}\"")"; then
+  echo "ERROR: could not read ${ver_var} from ${stack_env} (sops failed)." >&2
+  echo "       Refusing to guess -- that would pull :main over a pinned release." >&2
+  exit 1
+fi
 ref="${image}:${ver:-main}"
 
 echo ">> pulling $ref (direct — ignores pull_policy, re-points the tag) ..." >&2

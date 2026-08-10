@@ -16,7 +16,14 @@
 Description=Thriden wake-path deploy dispatcher (scheduled upgrade-at-wake)
 Documentation=file:/srv/thriden/docs/design-upgrade-at-wake.md
 After=docker.service
-Requires=docker.service
+# Wants, NOT Requires (MindHive-b5d5): on a WSL host with Docker Desktop there
+# is no docker.service unit at all -- the daemon lives on the Windows side and
+# the CLI is a symlink into Docker Desktop's mount. A hard Requires= on a unit
+# that does not exist fails the dependency, which fails the TIMER, which lands
+# as "enabled but state=failed" and never runs. Wants= keeps the ordering on a
+# host that does have the unit and is a no-op on one that does not; if docker
+# really is down, the dispatcher reports it through its own dependency check.
+Wants=docker.service
 
 [Service]
 Type=oneshot

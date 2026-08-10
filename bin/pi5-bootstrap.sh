@@ -70,6 +70,12 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get -y \
   -o Dpkg::Options::='--force-confdef' \
   upgrade
 
+# Host tools the deploy path shells out to. A minimal server image ships none of
+# them, and a missing jq fails quietly rather than loudly (no canary planted by
+# thriden-scion-up.sh, misread container state in thriden-doctor.sh) — so plant
+# them here, where host prep belongs.
+sudo DEBIAN_FRONTEND=noninteractive apt-get -y install jq curl git
+
 if [[ -f /var/run/reboot-required ]]; then
   echo "[!] /var/run/reboot-required is set -- kernel or microcode advanced."
   echo "    Reboot manually when ready (not from inside this script):"

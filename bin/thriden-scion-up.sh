@@ -167,7 +167,9 @@ sops exec-env "$SECRETS" \
 plant_smoke_canary() {
   local svc="engram-$short" i ready=0 nodes_json node_id
   if ! command -v jq >/dev/null; then
-    echo "   (canary: jq not on host; skipping auto-plant — tier-2 will soft-skip)" >&2
+    echo "   (canary: jq is not installed on this host, so the smoke canary was not" >&2
+    echo "    planted — the bring-up itself succeeded and your Scion is up. Install it" >&2
+    echo "    (sudo apt install -y jq) and re-run this command to arm tier-2 validation.)" >&2
     return 0
   fi
   # Wait for the freshly-(re)started brain's HTTP to answer. /health is

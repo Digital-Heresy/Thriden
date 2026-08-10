@@ -681,7 +681,7 @@ else
       finalize failed
       exit 1
     elif [[ "$deployable" == "unknown" ]]; then
-      log warn "$svc /health returned no deployable field (older engram?); proceeding without the gate"
+      log warn "$svc /health gave no deployable field -- brain unreachable, or an engram too old to report it; proceeding without the gate"
     else
       log info "$svc deployable: true"
     fi
