@@ -25,7 +25,7 @@
     "min_upgrade_from": {
       "type": "string",
       "pattern": "^thriden-v[0-9]+\\.[0-9]+\\.[0-9]+$",
-      "description": "Optional lower bound on the host's current umbrella version (). When set, the on-host wrapper REFUSES the deploy (pre-claim in -i mode, so the dispatcher stamps dispatch_error) if the tree's current thriden-v* tag is below this, rather than perform an untested skip-hop that persisted-state migrations don't cover. PF writes it from the release manifest when a release requires stepping through an intermediate version. Format is a full tag, e.g. 'thriden-v0.9.0'; comparison is semver on the X.Y.Z after the prefix."
+      "description": "Optional lower bound on the host's current umbrella version. When set, the on-host wrapper REFUSES the deploy (pre-claim in -i mode, so the dispatcher stamps dispatch_error) if the tree's current thriden-v* tag is below this, rather than perform an untested skip-hop that persisted-state migrations don't cover. PF writes it from the release manifest when a release requires stepping through an intermediate version. Format is a full tag, e.g. 'thriden-v0.9.0'; comparison is semver on the X.Y.Z after the prefix."
     },
     "components": {
       "type": "object",
@@ -92,7 +92,7 @@
       }
     },
     "scion_scope": {
-      "description": "Which Scions this payload targets, set by the Forge scheduler () at write time. Either the string \"all\" or a non-empty array of Scion short names (e.g. [\"dm\"]). Consumed by PF's Scion-side orchestrator (): it sets the dispatch signal (dispatch_scion/dispatch_ready_at) for its Scion only when scion_scope is \"all\", absent, or contains its short \u00e2\u20ac\u201d absent is treated tolerantly as applicable. NOT consumed by the on-host wrapper, which deploys whatever services run on its host. Optional; absent = unscoped.",
+      "description": "Which Scions this payload targets, set by the Forge scheduler at write time. Either the string \"all\" or a non-empty array of Scion short names (e.g. [\"dm\"]). Consumed by PF's Scion-side orchestrator: it sets the dispatch signal (dispatch_scion/dispatch_ready_at) for its Scion only when scion_scope is \"all\", absent, or contains its short \u00e2\u20ac\u201d absent is treated tolerantly as applicable. NOT consumed by the on-host wrapper, which deploys whatever services run on its host. Optional; absent = unscoped.",
       "oneOf": [
         {
           "enum": [
@@ -177,7 +177,7 @@
     },
     "original_tags": {
       "type": "object",
-      "description": "Per-env-var EFFECTIVE revert targets captured before the pin step (keys are compose env var names -- a component may pin several, e.g. forge -> FORGE_VERSION + FORGE_RUNTIME_VERSION): the pre-pin env override if one existed, else the running container's image tag ( true-revert). Empty string = no override existed AND no matching container was running.",
+      "description": "Per-env-var EFFECTIVE revert targets captured before the pin step (keys are compose env var names -- a component may pin several, e.g. forge -> FORGE_VERSION + FORGE_RUNTIME_VERSION): the pre-pin env override if one existed, else the running container's image tag (true-revert). Empty string = no override existed AND no matching container was running.",
       "additionalProperties": false,
       "properties": {
         "ENGRAM_VERSION": {
@@ -245,18 +245,18 @@
     },
     "dispatch_scion": {
       "type": "string",
-      "description": "Wake-path dispatch signal (). Set by PF's Scion-side orchestrator at the /admin/sleep -> /admin/torpor transition: the Scion short (e.g. 'dm') this still-pending payload is cleared to deploy for. The on-host dispatcher (bin/thriden-deploy-dispatch.sh) runs the wrapper only for payloads whose dispatch_scion is a Scion local to that host. Paired with dispatch_ready_at."
+      "description": "Wake-path dispatch signal. Set by PF's Scion-side orchestrator at the /admin/sleep -> /admin/torpor transition: the Scion short (e.g. 'dm') this still-pending payload is cleared to deploy for. The on-host dispatcher (bin/thriden-deploy-dispatch.sh) runs the wrapper only for payloads whose dispatch_scion is a Scion local to that host. Paired with dispatch_ready_at."
     },
     "dispatch_ready_at": {
-      "description": "Wake-path dispatch signal (). Set by PF alongside dispatch_scion at the sleep->torpor transition. The host dispatcher only acts on it while fresh (within THRIDEN_DISPATCH_STALE_AFTER_MIN); a stale signal means the torpor window passed and is skipped.",
+      "description": "Wake-path dispatch signal. Set by PF alongside dispatch_scion at the sleep->torpor transition. The host dispatcher only acts on it while fresh (within THRIDEN_DISPATCH_STALE_AFTER_MIN); a stale signal means the torpor window passed and is skipped.",
       "bsonType": "date"
     },
     "dispatch_error": {
       "type": "string",
-      "description": "Set by the on-host dispatcher (bin/thriden-deploy-dispatch.sh) when the wrapper exits non-zero while the payload is STILL pending -- i.e. it failed BEFORE the atomic pending->in_progress claim (host.enc.env resolution, git self-sync to thriden_version, etc.), so the wrapper never got to mirror status/logs to this doc (). Without this the only evidence was host journalctl and the operator woke to an unexplained un-upgraded Scion. A short human-readable reason (wrapper exit code + last error line), so Forge can surface 'your scheduled upgrade could not start'. NOT set for post-claim failures (those carry status + logs + failure_kind) nor for the benign claim race (the doc is already in_progress by the winning runner). Cleared/overwritten on the next dispatch attempt. Paired with dispatch_error_at."
+      "description": "Set by the on-host dispatcher (bin/thriden-deploy-dispatch.sh) when the wrapper exits non-zero while the payload is STILL pending -- i.e. it failed BEFORE the atomic pending->in_progress claim (host.enc.env resolution, git self-sync to thriden_version, etc.), so the wrapper never got to mirror status/logs to this doc. Without this the only evidence was host journalctl and the operator woke to an unexplained un-upgraded Scion. A short human-readable reason (wrapper exit code + last error line), so Forge can surface 'your scheduled upgrade could not start'. NOT set for post-claim failures (those carry status + logs + failure_kind) nor for the benign claim race (the doc is already in_progress by the winning runner). Cleared/overwritten on the next dispatch attempt. Paired with dispatch_error_at."
     },
     "dispatch_error_at": {
-      "description": "When the dispatcher stamped dispatch_error. Paired with it ().",
+      "description": "When the dispatcher stamped dispatch_error. Paired with it.",
       "bsonType": "date"
     }
   }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Idempotently mint the random session-signing HMAC keys into the SOPS-encrypted
 # stack env, so a fresh install gets stable admin sessions without a manual
-# `openssl rand` step. ()
+# `openssl rand` step.
 #
 # SESSION_SECRET (forge-web) and NOOSCOPE_SESSION_SECRET (nooscope) sign admin
 # UI session cookies. Unset OR empty -> the service mints a per-boot EPHEMERAL
@@ -31,7 +31,6 @@
 # age key that decrypts stack.enc.env available to sops (SOPS_AGE_KEY_FILE or
 # the default keys.txt location).
 #
-# Bean: 
 
 set -euo pipefail
 

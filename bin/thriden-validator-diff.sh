@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # thriden-validator-diff.sh — show HOW the live deploy_payloads validator differs
-# from the shipped schema ().
+# from the shipped schema.
 #
 # thriden-doctor.sh check 5 reports "present but DIFFERS"; this prints the diff
 # so the difference is diagnosable instead of guessable. Read-only.
@@ -13,7 +13,7 @@ SCHEMA="schemas/deploy-payload-mongo.schema.json"
 STACK_ENV="secrets/prod/stack.enc.env"
 [[ -f "$SCHEMA" ]] || { echo "ERROR: $SCHEMA not found -- run from the stack dir." >&2; exit 1; }
 # Name the missing tool. This whole diagnostic exists because a jq-shaped hole
-# reported itself as a stale validator for four rounds (); it would
+# reported itself as a stale validator for four rounds; it would
 # be a poor joke for the tool written to explain that failure to fail the same
 # way with "jq: command not found".
 command -v jq >/dev/null 2>&1 || {

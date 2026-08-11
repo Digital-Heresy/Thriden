@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # thriden-deploy-dispatch.sh — host-side receiver for scheduled upgrade-at-wake
-# (, the host half of xluj's wake-path auto-claim).
+# (the host half of xluj's wake-path auto-claim).
 #
 # Why this exists: PF's Scion-side orchestrator runs INSIDE the forge-<scion>
 # container and cannot invoke the on-host wrapper (thriden-deploy-payload.sh —
@@ -27,9 +27,8 @@
 # is recorded by the wrapper itself (status + logs + failure_kind); a PRE-claim
 # failure leaves the doc untouched, so the dispatcher stamps dispatch_error /
 # dispatch_error_at onto the still-pending doc so it's operator-visible without
-# journalctl ().
+# journalctl.
 #
-# Bean:    (parent );  (pre-claim trace)
 # Design: docs/design-upgrade-at-wake.md § Resolved boundary (host dispatcher)
 # Seam:   schemas/deploy-payload-mongo.schema.json
 #         (dispatch_scion, dispatch_ready_at, dispatch_error, dispatch_error_at)
@@ -41,7 +40,7 @@ BASE_COMPOSE=(docker compose -f docker-compose.yml -f compose.prod.yml)
 # against acting on a payload whose torpor window has long passed (the Scion
 # may be awake again).
 #
-# ⚠ THERE IS CURRENTLY NO RECOVERY FROM A STALE SIGNAL ().
+# ⚠ THERE IS CURRENTLY NO RECOVERY FROM A STALE SIGNAL.
 # This comment used to end "PF refreshes the signal each sleep cycle", which is
 # FALSE and was load-bearing: it made the skip below look safe. PF arms only
 # payloads where `dispatch_ready_at` does NOT exist
@@ -123,7 +122,7 @@ payload_status() {
 
 stamp_dispatch_error() {
   # Record an operator-visible pre-claim failure on the still-pending doc
-  # (). $1 = oid, $2 = short reason string.
+  # $1 = oid, $2 = short reason string.
   mongo_eval 'db.deploy_payloads.updateOne({_id: new ObjectId(process.env.MONGO_QUERY_OID)}, {$set: {dispatch_error: process.env.MONGO_QUERY_ERRMSG, dispatch_error_at: new Date()}});' \
     "MONGO_QUERY_OID=$1" "MONGO_QUERY_ERRMSG=$2" >/dev/null
 }
@@ -160,7 +159,7 @@ while read -r oid scion; do
     continue
   fi
   echo "[dispatch] dispatching payload $oid for scion '$scion' -> wrapper" >&2
-  # No -S here: -i mode self-syncs unconditionally (). The
+  # No -S here: -i mode self-syncs unconditionally. The
   # wrapper reads the payload's thriden_version pre-claim, checks out that
   # release tag, and re-execs before the atomic claim — so a structural
   # release deploys from a single Forge "schedule" click with no manual
@@ -186,7 +185,7 @@ while read -r oid scion; do
     # pending, no error, no operator notification — the old "status recorded in
     # the payload doc" log line was a lie for this class. Stamp it so Forge can
     # surface "your scheduled upgrade could not start" without journalctl
-    # access ().
+    # access.
     status=$(payload_status "$oid")
     if [[ "$status" == "pending" ]]; then
       reason=$(grep -E 'ERROR:' "$wrapper_out" | tail -1 || true)

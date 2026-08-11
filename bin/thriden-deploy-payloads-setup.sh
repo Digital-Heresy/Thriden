@@ -21,7 +21,6 @@
 # Pre-reqs: docker compose stack up; docker available on the host.
 # Prod also needs sops (for the MONGO_ROOT_PASSWORD self-wrap).
 #
-# Bean:  Phase 3
 # Schema: schemas/deploy-payload-mongo.schema.json
 
 set -euo pipefail

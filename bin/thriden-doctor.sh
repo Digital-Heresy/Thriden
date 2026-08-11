@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# thriden-doctor.sh — one-command install verifier for Thriden hosts ().
+# thriden-doctor.sh — one-command install verifier for Thriden hosts.
 #
 # Turns "is this participant's install golden?" from a support conversation into
 # a command. Retro item from the 2026-07-03 Cairn upgrade series: every one of
@@ -19,7 +19,7 @@
 # Exit code: 0 if no FAIL (WARN still allowed); nonzero if any check FAILs.
 # "All green" (zero WARN, zero FAIL) = the install is golden.
 #
-# Checks (bean ):
+# Checks:
 #   0. Host command-line deps (docker/jq/curl/git) are on PATH. Without jq the
 #      checks below misread rather than fail loudly, so this one runs first.
 #   1. Host-short resolves (which chain step matched; warn if fragile).
@@ -27,7 +27,7 @@
 #   3. GHCR pull credential works (login/logout round-trip, isolated config).
 #   3b. That credential is actually authorized on EVERY pinned image. GHCR
 #       access is per-package, so a live PAT missing ONE package's grant passes
-#       check 3 and still cannot deploy ().
+#       check 3 and still cannot deploy.
 #   4. sops version >= 3.9 (the wrapper's rollback 'unset' path needs it).
 #   5. deploy_payloads validator present AND current vs the shipped schema.
 #   6. thriden-deploy-dispatch.timer installed + enabled + last run clean.
@@ -35,11 +35,11 @@
 #       the upgrade still never happen: arming needs the Scion to reach its
 #       cron SLEEP, which needs a sleep_schedule AND a host awake at that
 #       hour. Both failures are silent and both look like 'scheduled'
-#       forever ().
+#       forever.
 #   7. Per Scion drop-in: engram/forge running+healthy, canary fresh, soul bound,
 #      and the brain can actually EMBED -- a Voyage key that is configured but
 #      REJECTED passes every other check while leaving the Scion unable to form
-#      or recall a single memory ().
+#      or recall a single memory.
 #   8. No *_VERSION shadows in stack.enc.env (tpo4 discipline).
 #   9. Tree on a thriden-v* tag or main, clean (no stray files), remote reachable.
 #
@@ -180,11 +180,11 @@ have_jq=0; command -v jq >/dev/null 2>&1 && have_jq=1
 # right-hand side when the left is `false` OR null, so a genuine `false`
 # arrives as "" and every `[[ "$x" == "false" ]]` downstream silently never
 # matches. That is not hypothetical: it is how check 7's ENTIRE embedding arm
-# became dead code (``) -- both the rejected-key FAIL and the
+# became dead code -- both the rejected-key FAIL and the
 # no-key WARN -- so a brain that could not embed a single memory fell through
 # to `report PASS "engram+forge healthy"`. The check written to stop a brain
 # reporting healthy while broken was doing it itself, and the same trap sat in
-# the deploy wrapper's deployable gate (``). Verified against
+# the deploy wrapper's deployable gate. Verified against
 # jq 1.7.1. Use this helper; do not "simplify" it back to `//`.
 # Tests the TYPE rather than using has(), so this works on nested paths too
 # (has() only takes a top-level key -- a `json_bool .a.b` built on it would
@@ -282,7 +282,7 @@ check_secrets_decrypt() {
 # doctor actively misleading.
 #
 # This is not hypothetical: it is the failure mode built into vendoring the
-# socket proxy (). A brand-new private package does NOT inherit
+# socket proxy. A brand-new private package does NOT inherit
 # the grants its siblings already carry, so on the day compose repinned to
 # `thriden-socket-proxy` every participant PAT could still pull
 # engram/forge/nooscope and not the proxy. 3b names that cause out loud.
@@ -500,7 +500,7 @@ print(v ? JSON.stringify(v) : "__NO_VALIDATOR__");'
     report PASS "5. deploy_payloads validator" "present and matches shipped schema"
   else
     # Say HOW it differs. "Stale" alone sends the reader to re-run the applier,
-    # and when that does not fix it they have nowhere to go (: a
+    # and when that does not fix it they have nowhere to go (a
     # participant re-applied and got the identical WARN). The key delta tells
     # "older schema" apart from "the applier and this checker disagree".
     local delta="" only_shipped="" only_live="" rq_s="" rq_l=""
@@ -571,7 +571,7 @@ check_dispatch_timer() {
     # 'failed' is not the same as 'stopped', and the difference matters: a unit
     # that failed once STAYS failed until reset, so this keeps reporting the old
     # failure after the cause is fixed — which reads as "the fix did not work"
-    # (: a participant fixed the underlying unit, saw the service
+    # (a participant fixed the underlying unit, saw the service
     # start cleanly, and still got this FAIL from a failure minutes earlier).
     # `start` alone will not clear it.
     if [[ "$active" == "failed" ]]; then
@@ -609,7 +609,7 @@ check_scions() {
     # conflating them hides a real split brain: a participant's Scion was running
     # and answering while this check reported nothing provisioned, because the
     # containers had been brought up from a DIFFERENT clone than the one the
-    # doctor ran in (). The dispatcher points at THIS directory, so
+    # doctor ran in. The dispatcher points at THIS directory, so
     # a scheduled upgrade would act on a Scion set it cannot see.
     #
     # But "engram container running" alone is not the tell: on a DEV host the
@@ -677,11 +677,11 @@ check_scions() {
     # Soul binding (instance.json forge_soul_id) on the brain.
     local soul=""
     soul="$(docker compose "${files[@]}" exec -T "$esvc" cat /data/instance.json 2>/dev/null | jq -r '.forge_soul_id // empty' 2>/dev/null)"
-    # Embedding capability (). A brain whose Voyage key is being
+    # Embedding capability. A brain whose Voyage key is being
     # REJECTED passes every check above -- containers up, healthy, soul bound,
     # canary fresh -- and still cannot form or recall a single memory: recall
     # embeds the query text before the ANN lookup, so every message 500s. That
-    # is the beta participant's incident (), and "all green" said
+    # is the beta participant's incident, and "all green" said
     # golden throughout it.
     #
     # /admin/embedding is authenticated, so the read happens INSIDE the
@@ -725,7 +725,7 @@ check_scions() {
     fi
     # A brain rejecting our credential presents EXACTLY like a brain that cannot
     # embed: every call fails, the Scion answers nothing, and the containers all
-    # look fine ( raised this from the in-voice side -- 401 is
+    # look fine (raised this from the in-voice side -- 401 is
     # an operator condition, nothing the human in the room did). Distinguish it
     # here rather than leaving an "http 401" crumb in the canary clause, since
     # the remedy is completely different: fix the token, not the Voyage key.
@@ -782,7 +782,7 @@ check_scions() {
         # Scion that has not formed a memory yet has nothing to point at. That
         # is every freshly-genesised Scion, i.e. every participant's first
         # doctor run, and calling it FAIL tells them a correct install is
-        # broken (). A brain WITH content and no canary is the
+        # broken. A brain WITH content and no canary is the
         # real gap: scion-up should have planted one and did not.
         nodes_probe="$(docker compose "${files[@]}" exec -T "$esvc" \
           sh -c 'curl -fsS -H \"Authorization: Bearer $ENGRAM_RAVEN_TOKEN\" \"http://localhost:3030/nodes?limit=1\"' \
@@ -856,7 +856,7 @@ check_tree() {
   # own required config as strays — .sops.yaml and .thriden-host-short are
   # literally created by following the onboarding guide, and compose-<short>.yml
   # is written by scion-up. Flagging those trains people to ignore this check,
-  # which is the opposite of what it is for ().
+  # which is the opposite of what it is for.
   dirt="$(git status --porcelain 2>/dev/null \
           | grep -vE '^...(secrets/|\.sops\.yaml|\.thriden-host-short|\.docker/|compose-[A-Za-z0-9._-]+\.yml)' \
           || true)"
@@ -893,7 +893,7 @@ check_tree() {
 # a payload: Forge writes it, it sits `pending` forever, no error is recorded,
 # and it is indistinguishable from a schedule that has not come due yet.
 #
-# That is precisely what the first beta participant hit (): a
+# That is precisely what the first beta participant hit: a
 # pending thriden-v0.20.0 payload with no dispatch_scion / dispatch_ready_at,
 # a green dispatcher polling for a signal nothing would ever send, and an
 # overnight wait for an upgrade that could not occur. Nothing on the host said
@@ -945,7 +945,7 @@ print(JSON.stringify({total: s.length, pending: pend.length, nosleep: none, adva
   # (absent, or mongosh prefixing a warning onto the JSON) yields empty strings,
   # "nosleep" reads as "nothing missing", and this reports PASS -- a false green
   # out of a parse failure. That is how check 5 once called a fine validator
-  # stale and check 7 called healthy containers "not created" ();
+  # stale and check 7 called healthy containers "not created";
   # the first draft of THIS check did it too. An unreadable answer is not a
   # good answer.
   n_total="$(printf '%s' "$out" | jq -r '.total' 2>/dev/null || true)"
@@ -982,7 +982,7 @@ print(JSON.stringify({total: s.length, pending: pend.length, nosleep: none, adva
   # only, so an operator can and does set a weekly (or rarer) schedule --
   # PersonaForge's own UI already has an "(advanced)" display mode for exactly
   # this. deploy_payloads doesn't yet reliably record which Scion a pending
-  # payload targets (scion_scope is optional, ), so this
+  # payload targets (scion_scope is optional), so this
   # can't be joined per-payload -- if ANY Scion on the host runs a non-daily
   # schedule, the 26h heuristic is not sound and asserting FAIL would just
   # trade the old silent assumption for a loud wrong one. Downgrade to WARN
@@ -991,7 +991,7 @@ print(JSON.stringify({total: s.length, pending: pend.length, nosleep: none, adva
   # The usual cause of a genuine miss is the host not being awake at its own
   # sleep time: powered off, suspended, or -- the case that found this --
   # HIBERNATED, which looks "on" to the operator while the wall-clock window
-  # passes unfired ().
+  # passes unfired.
   if [[ "${n_pending:-0}" -gt 0 && "${oldest:--1}" -ge 26 ]]; then
     if [[ -n "$advanced" ]]; then
       report WARN "6b. Scheduled upgrades armable" \

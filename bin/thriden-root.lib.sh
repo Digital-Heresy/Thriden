@@ -9,7 +9,7 @@
 # a container with no bind-mount of the checkout and deliberately no docker
 # socket, so there is no filesystem to stat and no docker API to interrogate.
 # The host has to tell it. PF resolves it as a ladder
-# (PersonaForge forge/admin/thriden_host.py, ):
+# (PersonaForge forge/admin/thriden_host.py):
 #
 #   1. THRIDEN_HOST_ROOT env  -- what this library supplies
 #   2. Mongo system_config._id="thriden_host"  -- operator-set at /setup

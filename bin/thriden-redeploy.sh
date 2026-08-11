@@ -40,11 +40,11 @@ cd "$STACK_DIR"
 # Compose lowercases the project name and strips characters outside
 # [a-z0-9_-], so a raw basename is wrong for any capitalised directory and the
 # derived container name below never resolves -- the health wait then spins the
-# full 60s and reports state=unknown ( sweep).
+# full 60s and reports state=unknown (sweep).
 proj="${COMPOSE_PROJECT_NAME:-$(basename "$STACK_DIR" | tr "[:upper:]" "[:lower:]" | tr -cd "a-z0-9_-")}"
 stack_env="secrets/prod/stack.enc.env"
 
-# Pin versions from the non-secret manifest () so a host migrated
+# Pin versions from the non-secret manifest so a host migrated
 # off stack.enc.env pins resolves a real tag below, not `:-main`. A *_VERSION
 # still in stack.enc.env wins (sops exec-env layers it on top in the resolve).
 [ -f deploy/versions.env ] && { set -a; . ./deploy/versions.env; set +a; }

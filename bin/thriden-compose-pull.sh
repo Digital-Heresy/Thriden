@@ -63,8 +63,6 @@
 #   - host short: derived from `hostname -s` (matches secrets/prod/hosts/<short>/)
 #
 # Background: docs/secrets-ops.md § 6b
-# Beans:  (initial),  (injection hardening),
-#         (multi-file + sops key delivery)
 
 set -euo pipefail
 
@@ -156,7 +154,7 @@ printf '%s' "$GHCR_PULL_TOKEN" | \
 # step. compose.prod.yml pins `pull_policy: missing` on forge-web/nooscope/caddy
 # so `up -d` reuses local images; without the override a plain `pull` skips any
 # image already present locally and never fetches a moving tag like :main
-# (). The later `up -d --pull never` still reuses this just-pulled
+# The later `up -d --pull never` still reuses this just-pulled
 # image, so the credential-window discipline is preserved.
 docker compose "${compose_args[@]}" pull --policy always
 INNER_EOF
@@ -185,7 +183,7 @@ if [[ $pull_rc -ne 0 ]]; then
   # that can tell the two apart. Deliberately NOT a fallback to some other
   # image: silently substituting a third-party socket proxy for the vendored
   # one would undo the trust-boundary this stack was changed to get
-  # (), and would do it invisibly, which is worse than stopping.
+  # and would do it invisibly, which is worse than stopping.
   cat >&2 <<EOF
 
 ERROR: image pull failed — NOTHING was recreated, the running stack is untouched.

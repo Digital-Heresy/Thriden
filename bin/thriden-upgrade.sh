@@ -2,7 +2,7 @@
 #
 # thriden-upgrade.sh — apply a not-sleep-eligible Thriden upgrade in one
 # command. This is the operator-facing one-liner the Forge release page
-# advertises for manual (synchronous) upgrades ().
+# advertises for manual (synchronous) upgrades.
 #
 #     ssh <host> 'sudo /srv/thriden/bin/thriden-upgrade.sh'
 #
@@ -75,7 +75,7 @@ if [ -z "$self_before" ]; then
   echo "         this run. If this release changes the deploy scripts, re-run." >&2
 fi
 
-# A prior scheduled deploy (bin/thriden-deploy-payload.sh self-sync, )
+# A prior scheduled deploy (bin/thriden-deploy-payload.sh self-sync)
 # leaves HEAD detached at a release tag; `git pull --ff-only` can't fast-forward a
 # detached HEAD. Re-attach to main first — but only when detached, so an operator
 # deliberately on a branch isn't yanked off it. No-op on a host already on a branch.
@@ -88,7 +88,7 @@ git pull --ff-only
 
 # ── 1b. Self-update guard: re-exec if the pull replaced THIS script ─────────
 # The pull carries a new copy of this very file. Without this block bash keeps
-# executing the copy it already loaded, which is wrong in two ways ():
+# executing the copy it already loaded, which is wrong in two ways:
 #
 #   1. Any fix to this script lands ONE RUN LATE. Seen live on Cairn upgrading
 #      thriden-v0.15.0 -> v0.16.0: the run that delivered "also recreate
@@ -144,7 +144,7 @@ echo ">> target: forge=$FORGE_VERSION  forge-runtime=$FORGE_RUNTIME_VERSION  eng
 # OPEN when it cannot see is worse than no guard, because the abort message is
 # the only thing standing between an operator and an unprotected brain swap
 # (no pre-flight export, no post-swap canary, no auto-revert). Matching on the
-# image ref needs no project name at all ( sweep).
+# image ref needs no project name at all (sweep).
 if ! docker_ps_out="$(docker ps --format '{{.Image}}' 2>&1)"; then
   cat >&2 <<EOF
 ABORT: cannot list running containers, so the brain-swap guard cannot verify
@@ -216,7 +216,7 @@ echo ">> recreating substrate (forge-web, nooscope, docker-socket-proxy) ..." >&
 # the local cache and then never be applied -- the running proxy would sit on
 # the old image while `deploy/versions.env` and the release notes both claimed
 # the base had been refreshed. That silent no-op defeats the weekly-rebuild
-# freshness model the vendored image exists for (). It is safe to
+# freshness model the vendored image exists for. It is safe to
 # recreate unconditionally: the proxy is stateless, holds no volumes beyond the
 # :ro docker socket, and forge-web reconnects on its next request.
 COMPOSE_IGNORE_ORPHANS=true sops exec-env "$STACK_ENV" "$BASE_COMPOSE up -d forge-web nooscope docker-socket-proxy"

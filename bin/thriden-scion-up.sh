@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # thriden-scion-up.sh — bring a provisioned Scion's runtime online in one
-# command (MindHive-<bean> /  follow-up).
+# command (follow-up).
 #
 # After Genesis (Web Incubator) a Scion exists in Mongo but isn't running.
 # Bringing it up on the Thriden host means: render an image-pinned
@@ -51,7 +51,7 @@ fi
 
 cd "$STACK_DIR"
 
-# Pin component versions from the non-secret manifest () so a host
+# Pin component versions from the non-secret manifest so a host
 # migrated off stack.enc.env version pins still gets a pinned ENGRAM_VERSION /
 # FORGE_RUNTIME_VERSION rather than the `:-main` footgun. A *_VERSION still in
 # stack.enc.env wins — `sops exec-env "$SECRETS"` layers it on top below.
@@ -150,7 +150,7 @@ sops exec-env "$SECRETS" \
   "$BASE_COMPOSE exec -T forge-web personaforge-admin scion update $SCION_ID engram_external=true" \
   >/dev/null 2>&1 || echo "   (warning: could not set engram_external; set it from the detail page)" >&2
 
-# ── Auto-plant a smoke canary () ──────────────────────────────
+# ── Auto-plant a smoke canary ──────────────────────────────
 # A fresh Scion has no canary, so every upgrade-at-wake deploy tier-2 soft-skips
 # and retrieval-path validation is silently off until an operator remembers
 # runbook-provision-scion § 8. Beta participants will not remember. Plant (or
@@ -230,7 +230,7 @@ plant_smoke_canary
 # this script is already sops-wrapped, so the script did the right thing
 # throughout and then handed the operator advice that had drifted from its own
 # practice. The first beta participant to stand a Scion up hit exactly this and
-# had to re-wrap the command by hand ().
+# had to re-wrap the command by hand.
 #
 # SUDO_USER is set iff we came through the self-elevation above (or the
 # operator sudo'd in themselves) -- the same condition under which their own

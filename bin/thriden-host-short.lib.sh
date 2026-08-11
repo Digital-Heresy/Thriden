@@ -6,7 +6,7 @@
 # secrets/prod/hosts/<host-short>/host.enc.env, but <host-short> is the
 # SECRETS BUNDLE name, not necessarily the OS hostname (booklore runs the
 # pi5-prod bundle). Deriving it from `hostname -s` broke the first scheduled
-# upgrade-at-wake dispatch ( integration bug #3): the dispatcher
+# upgrade-at-wake dispatch (integration bug #3): the dispatcher
 # invoked the wrapper with no -h override and the wrapper died pre-claim on
 # "secrets/prod/hosts/booklore/host.enc.env not found" for the whole torpor
 # window. Manual paths had always worked because the operator passed

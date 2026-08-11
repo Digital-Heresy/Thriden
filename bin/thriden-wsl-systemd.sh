@@ -2,7 +2,7 @@
 #
 # thriden-wsl-systemd.sh — turn on the scheduled upgrade path on a WSL host.
 #
-# WHY YOU NEED THIS ()
+# WHY YOU NEED THIS
 # Scheduled "upgrade at next sleep" is executed by a systemd timer on your host.
 # WSL ships with systemd OFF, so without it the Forge banner's schedule button
 # has nothing listening. That is survivable right up until the first BRAIN

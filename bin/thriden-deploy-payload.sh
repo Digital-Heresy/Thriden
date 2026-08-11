@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 1 of : on-host execution layer for upgrade-at-wake
+# On-host execution layer for upgrade-at-wake (phase 1)
 # payloads. Reads a manifest from a file, executes the full lifecycle
 # (pre-flight backup → pin → swap → smoke → promote-or-rollback →
 # torpor), writes a result file.
@@ -14,7 +14,7 @@
 #   - /admin/deployable check (Phase 2): pre-flight verifies each
 #     running engram-* service reports `deployable: true` via /health.
 #     Refuses to proceed if any Scion has flipped its flag to false.
-#   - Tier 2 canary smoke (``): post-swap, calls
+#   - Tier 2 canary smoke: post-swap, calls
 #     /admin/canary on each engram-* container and verifies the planted
 #     canary node round-trips. 404 = soft skip (operator hasn't planted
 #     a canary for that Scion, or it went stale); other failures fail
@@ -22,7 +22,7 @@
 #   - Engram-side operations (backup, import, torpor) are skipped with
 #     a log entry if no engram-* services are running. This lets pi5-
 #     smoke exercise the script with just forge-web/nooscope.
-#   - Git self-sync to thriden_version (): -i (Mongo) mode
+#   - Git self-sync to thriden_version: -i (Mongo) mode
 #     always checks out the payload's release tag before the claim (pre-claim
 #     read → checkout → guarded re-exec); -m (file) mode does the same on
 #     opt-in via -S. Lets a structural release deploy from one Forge
@@ -44,7 +44,6 @@
 #
 # Background: docs/design-upgrade-at-wake.md
 # Schema:     schemas/deploy-payload.schema.json
-# Bean:        (parent )
 
 set -euo pipefail
 
@@ -70,7 +69,7 @@ while getopts "m:i:h:r:s:S" opt; do
 done
 
 # Resolve our own absolute path ONCE, up front, and re-exec through it instead of
-# a bare "$0" ( hardening). The three re-execs below (sops self-wrap,
+# a bare "$0" (hardening). The three re-execs below (sops self-wrap,
 # -S file sync, -i mongo sync) are sound today — the dispatcher invokes us by
 # absolute path and the wrapper never cd's — but `exec "$0"` would silently fail
 # if a future refactor added a cd before a re-exec, or if we were invoked by a
@@ -94,7 +93,7 @@ if [[ -n "$manifest" && ! -f "$manifest" ]]; then
   exit 1
 fi
 
-# ── Git self-sync to the manifest's thriden_version () ─────
+# ── Git self-sync to the manifest's thriden_version ─────
 #
 # Bring the stack tree to the payload's `thriden_version` BEFORE deploying,
 # so a release that changes compose *structure* (new service / env var /
@@ -131,7 +130,7 @@ git_sync_to_tag() {
   # fresh nonce each time), so that file is left git-dirty after ANY deploy —
   # even a clean, fully-unpinned one. Excluding secrets/ from the guard stops
   # that self-inflicted noise from refusing the NEXT hop pre-claim, which bit
-  # hosts mid-upgrade (). The guard still protects uncommitted
+  # hosts mid-upgrade. The guard still protects uncommitted
   # code/compose edits — the operator work it actually exists to defend.
   if ! git diff --quiet -- . ':(exclude)secrets/' \
      || ! git diff --cached --quiet -- . ':(exclude)secrets/'; then
@@ -165,7 +164,7 @@ git_sync_to_tag() {
   return 0
 }
 
-# ── min_upgrade_from guardrail () ─────────────────────────
+# ── min_upgrade_from guardrail ─────────────────────────
 #
 # A payload MAY carry `min_upgrade_from` (a thriden-v* tag). Bundles are fully
 # encapsulated (exact image pins, no deltas) so any forward jump is
@@ -398,7 +397,7 @@ mongo_eval() {
 mongo_read_thriden_version() {
   # Pure read (no status filter, no mutation) so it works on a still-pending
   # doc and CANNOT claim it — this runs before the atomic claim during the
-  # -i self-sync (). Prints the bare thriden_version, or empty.
+  # -i self-sync. Prints the bare thriden_version, or empty.
   mongo_eval "$(cat <<'JS'
 const _id = process.env.MONGO_QUERY_PAYLOAD_ID;
 const doc = db.deploy_payloads.findOne({_id: new ObjectId(_id)}, {thriden_version: 1});
@@ -409,7 +408,7 @@ JS
 
 mongo_read_min_upgrade_from() {
   # Pure read (same pre-claim contract as mongo_read_thriden_version) for the
-  # optional min_upgrade_from floor (). Prints the bare value, or
+  # optional min_upgrade_from floor. Prints the bare value, or
   # empty when the payload sets no floor.
   mongo_eval "$(cat <<'JS'
 const _id = process.env.MONGO_QUERY_PAYLOAD_ID;
@@ -483,7 +482,7 @@ JS
 
 if [[ -n "$mongo_id" ]]; then
   # Self-sync the tree to the payload's thriden_version BEFORE the claim
-  # (). We're now past the sops self-wrap + compose-file set,
+  # We're now past the sops self-wrap + compose-file set,
   # so mongosh is reachable; the read is non-mutating (mongo_read_thriden_version
   # uses findOne, no status filter) so it can't claim the doc. On checkout
   # failure we exit before the atomic claim, leaving the doc pending and
@@ -505,9 +504,9 @@ if [[ -n "$mongo_id" ]]; then
       echo "ERROR: payload $mongo_id carries no thriden_version to sync to (doc left pending, reclaimable)" >&2
       exit 1
     fi
-    # min_upgrade_from floor (), pre-claim + pre-checkout: refuse a
+    # min_upgrade_from floor, pre-claim + pre-checkout: refuse a
     # skip-hop BEFORE claiming or moving the tree. A non-zero exit here leaves
-    # the doc pending, so the dispatcher stamps dispatch_error ()
+    # the doc pending, so the dispatcher stamps dispatch_error
     # and the operator sees why the scheduled upgrade won't start.
     enforce_min_upgrade_from "$(mongo_read_min_upgrade_from | tr -d '[:space:]')" \
       || { echo "ERROR: payload $mongo_id refused by min_upgrade_from floor; doc left pending" >&2; exit 1; }
@@ -688,13 +687,13 @@ else
   # FRESH deployable: false (long consolidation, mid-cycle work). See
   # docs/design-upgrade-at-wake.md "Sleep-cycle alignment".
   #
-  # ⚠ This gate did nothing at all until , in two independent
-  # ways that each concealed the other:
+  # ⚠ This gate did nothing at all before it was rebuilt, in
+  # two independent ways that each concealed the other:
   #
   #   1. Nothing ever POSTed /admin/deployable. The flag booted true and no
   #      caller existed in either repo, so the check read a constant back and
   #      logged it as a verified result. PF now derives and heartbeats it
-  #      (forge/core/deployable.py, ).
+  #      (forge/core/deployable.py).
   #   2. `.deployable // "unknown"` sent a genuine `false` down the PROCEED
   #      branch. jq's `//` yields the right-hand side when the left is false
   #      OR null, so the refusal below was unreachable even had the flag been
@@ -844,7 +843,7 @@ if [[ ${#swap_services[@]} -eq 0 && ${#scion_swap_shorts[@]} -eq 0 ]]; then
 fi
 
 # Map env var → the running container that carries its CURRENT tag. This is
-# the TRUE revert target (): on a post-tpo4 host the env
+# the TRUE revert target: on a post-tpo4 host the env
 # override is usually unset, and by the time the wrapper runs the tree's
 # deploy/versions.env already carries the NEW release — so "revert to the
 # pre-pin env value" would materially re-deploy the new version. What the
@@ -908,10 +907,10 @@ done
 # FORGE_RUNTIME_VERSION never entered the pin/revert accounting for that run —
 # and nothing logged its absence, so the split was invisible until an operator
 # eyeballed `docker ps`. Log the resolved pin set so a missing scion var is
-# caught immediately next time ().
+# caught immediately next time.
 log info "pin set: ${pin_vars[*]}"
 
-# Belt-and-suspenders scion runtime/brain revert target (). The
+# Belt-and-suspenders scion runtime/brain revert target. The
 # per-Scion runtime (forge-<short>) and brain (engram-<short>) are (re)rendered
 # by bin/thriden-scion-up.sh, which sources deploy/versions.env — the TREE
 # recipe — on every recreate. That export wins over any pin the generic loop
@@ -980,7 +979,7 @@ revert_pins() {
         ;;
     esac
   done
-  # : unconditionally pin the scion runtime/brain vars to their
+  # unconditionally pin the scion runtime/brain vars to their
   # captured pre-deploy tags. The generic loop above may never have processed
   # these (the v0.10.0 rollback proved it can be skipped), and even when it does,
   # scion-up re-sources deploy/versions.env on recreate — so this explicit pin is
@@ -1100,7 +1099,7 @@ smoke_tier_1() {  # healthcheck: HTTP /health returns 200 within the budget
     return 0
   fi
 
-  # nooscope: probe from the HOST, not in-container (). Its image is
+  # nooscope: probe from the HOST, not in-container. Its image is
   # nginx-unprivileged:alpine with `apk del curl` (curl dropped for CVEs), so the
   # in-container `curl` probe below can NEVER succeed for it — it timed out every
   # deploy and was swallowed by the non-gating flag, so the check never actually
@@ -1151,7 +1150,7 @@ smoke_failed=false
 failed_component=""
 
 # A smoke failure on a NON-GATING component records + warns but never rolls the
-# bundle back. nooscope is non-gating (): a stateless, read-only
+# bundle back. nooscope is non-gating: a stateless, read-only
 # viewer must not veto a brain+runtime upgrade that otherwise passed. It stays
 # non-gating as a backstop even now that its tier-1 probe actually works
 # (host-side; see smoke_tier_1). Historically its "failures" were NOT a
@@ -1159,7 +1158,7 @@ failed_component=""
 # nooscope image, which has curl stripped for CVEs, so the check timed out every
 # deploy regardless of nooscope's health. Even a genuinely still-warming viewer
 # (its entrypoint waits up to 90s for forge-web's roster, then degraded-boots per
-# ) shouldn't roll back a good upgrade. Gating components (engram
+#) shouldn't roll back a good upgrade. Gating components (engram
 # brain, forge runtime + substrate) still roll back on failure.
 smoke_is_gating() {
   case "$1" in
@@ -1208,7 +1207,7 @@ for c in "${components[@]}"; do
       fi
     fi
 
-    # Tier 2 (engram canary query) -- . Operator pre-plants
+    # Tier 2 (engram canary query). Operator pre-plants
     # a real node as the canary via POST /admin/canary/plant on each
     # engram-* container; the wrapper fetches it post-swap to verify the
     # new build's query path returns recognised data.
@@ -1260,7 +1259,7 @@ for c in "${components[@]}"; do
 done
 
 # Non-gating smoke failures (nooscope) are recorded in the result doc for the
-# operator but do NOT trigger a rollback ().
+# operator but do NOT trigger a rollback.
 if (( ${#soft_smoke_failures[@]} > 0 )); then
   soft_json=$(printf '%s\n' "${soft_smoke_failures[@]}" | jq -R . | jq -s .)
   set_result_field '.soft_smoke_failures' "$soft_json"
@@ -1282,7 +1281,7 @@ if $smoke_failed; then
       || log error "  recreate-original failed; stack in unknown state"
   fi
 
-  # : record the actual post-revert scion image tags so a runtime
+  # record the actual post-revert scion image tags so a runtime
   # that failed to roll back (the v0.10.0 forge-dm split) is visible in the
   # result doc instead of only in `docker ps`. A mismatch vs scion_pre_tag here
   # means the force-pin above did not take — manual review.

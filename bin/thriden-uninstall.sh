@@ -48,7 +48,7 @@ DEPLOY_USER="${THRIDEN_DEPLOY_USER:-deploy}"
 # volumes, against a real 12 and 8. This script would have reported success
 # while leaving every Scion volume, i.e. every brain, on disk. Telling someone
 # their data is deleted when it is not is the worst failure this repo can have
-# ( sweep).
+# (sweep).
 #
 # Authoritative source first: ask an existing container what project it
 # belongs to. Fall back to the normalised basename, and SAY it was a guess.
