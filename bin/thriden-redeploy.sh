@@ -49,6 +49,24 @@ stack_env="secrets/prod/stack.enc.env"
 # still in stack.enc.env wins (sops exec-env layers it on top in the resolve).
 [ -f deploy/versions.env ] && { set -a; . ./deploy/versions.env; set +a; }
 
+# Tell forge-web where this checkout lives, so the commands it renders point at
+# a real path instead of the hardcoded /srv/thriden. Sourcing exports
+# THRIDEN_HOST_ROOT; the recreate below carries it into the container. Sourced
+# in every wrapper that recreates forge-web, so the value is CONSISTENT across
+# them -- a var that is set by one wrapper and unset by another makes compose
+# churn the container on alternate runs.
+# Guarded: this rung is a convenience (it saves the operator a one-time /setup
+# entry), so a tree missing the file must degrade, not abort -- but silently
+# falling back to the hardcoded /srv/thriden would hand a custom-path operator a
+# broken command, so say so.
+# shellcheck source=bin/thriden-root.lib.sh
+if [ -f "$(dirname "$0")/thriden-root.lib.sh" ]; then
+  . "$(dirname "$0")/thriden-root.lib.sh"
+else
+  echo "WARN: bin/thriden-root.lib.sh missing; forge-web will fall back to its" >&2
+  echo "      /setup override (or /srv/thriden) for rendered commands." >&2
+fi
+
 # Host short for the GHCR pull credential (shared resolution chain).
 # shellcheck source=bin/thriden-host-short.lib.sh
 . "$(dirname "$0")/thriden-host-short.lib.sh"

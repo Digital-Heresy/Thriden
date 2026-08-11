@@ -31,6 +31,11 @@
 #   4. sops version >= 3.9 (the wrapper's rollback 'unset' path needs it).
 #   5. deploy_payloads validator present AND current vs the shipped schema.
 #   6. thriden-deploy-dispatch.timer installed + enabled + last run clean.
+#   6b. A scheduled upgrade can actually ARM. The dispatcher can be green and
+#       the upgrade still never happen: arming needs the Scion to reach its
+#       cron SLEEP, which needs a sleep_schedule AND a host awake at that
+#       hour. Both failures are silent and both look like 'scheduled'
+#       forever ().
 #   7. Per Scion drop-in: engram/forge running+healthy, canary fresh, soul bound,
 #      and the brain can actually EMBED -- a Voyage key that is configured but
 #      REJECTED passes every other check while leaving the Scion unable to form
@@ -168,6 +173,29 @@ printf '%s== Thriden doctor ==%s  host-short=%s  stack=%s\n\n' \
 # live run). Report the missing tool itself, and have the checks that need it
 # skip rather than invent a finding.
 have_jq=0; command -v jq >/dev/null 2>&1 && have_jq=1
+
+# Read a BOOLEAN out of JSON. Prints "true", "false", or "" if absent/unreadable.
+#
+# ⚠ Never parse a boolean with `jq -r '.field // empty'`. jq's `//` yields the
+# right-hand side when the left is `false` OR null, so a genuine `false`
+# arrives as "" and every `[[ "$x" == "false" ]]` downstream silently never
+# matches. That is not hypothetical: it is how check 7's ENTIRE embedding arm
+# became dead code (``) -- both the rejected-key FAIL and the
+# no-key WARN -- so a brain that could not embed a single memory fell through
+# to `report PASS "engram+forge healthy"`. The check written to stop a brain
+# reporting healthy while broken was doing it itself, and the same trap sat in
+# the deploy wrapper's deployable gate (``). Verified against
+# jq 1.7.1. Use this helper; do not "simplify" it back to `//`.
+# Tests the TYPE rather than using has(), so this works on nested paths too
+# (has() only takes a top-level key -- a `json_bool .a.b` built on it would
+# return "" for a perfectly good `false`, which is this bug wearing a hat).
+# Absent, null, and non-boolean all collapse to "" deliberately: the callers
+# below distinguish "" from "false" and must not treat a string "false" or an
+# unreadable probe as a verdict.
+json_bool() { # $1 = jq path expression (e.g. .embedding_ok), stdin = JSON
+  jq -r "if ($1 | type) == \"boolean\" then ($1 | tostring) else \"\" end" 2>/dev/null || true
+}
+
 check_host_deps() {
   local t missing=() apt=()
   for t in docker jq curl git; do
@@ -502,9 +530,28 @@ print(v ? JSON.stringify(v) : "__NO_VALIDATOR__");'
 # ── Check 6 — dispatch timer installed + enabled + last run clean ──────────
 check_dispatch_timer() {
   if ! command -v systemctl >/dev/null 2>&1 || ! systemctl list-units >/dev/null 2>&1; then
-    report WARN "6. Upgrade dispatcher timer" \
-      "systemd unavailable on this host (WSL single-user?); scheduled upgrade-at-wake not applicable here" \
-      "on a systemd host, install per runbook-upgrade-thriden.md § 7b; on WSL use the manual upgrade path (beta-onboarding.md § 9)"
+    # Say what is LOST, not that the feature is "not applicable". WSL ships
+    # systemd OFF, so the Forge banner's schedule button has nothing listening
+    # -- scheduled upgrades silently never run. That is survivable until the
+    # first BRAIN (engram) upgrade, which bin/thriden-upgrade.sh refuses to do
+    # synchronously on purpose (it needs the pre-flight export + post-swap
+    # canary + auto-revert only the scheduled path carries). At that point the
+    # host has NO upgrade route at all.
+    #
+    # This branch used to say "not applicable here" and route to the manual
+    # path, which reads as by-design and is wrong: bin/thriden-wsl-systemd.sh
+    # exists precisely to make it applicable, and it ships to every beta host
+    # in the mirror manifest. A beta participant on WSL followed that advice
+    # and sat waiting for an overnight upgrade that could never fire.
+    if grep -qi microsoft /proc/version 2>/dev/null; then
+      report WARN "6. Upgrade dispatcher timer" \
+        "systemd is OFF (WSL default), so NOTHING listens for the Forge 'schedule at next sleep' button -- scheduled upgrades will silently never run, and engram/brain upgrades have no route at all (the synchronous path refuses them by design)" \
+        "turn it on, it is on this host already: bin/thriden-wsl-systemd.sh (two passes -- it tells you when to run bin\\thriden-wsl-restart.ps1 from PowerShell in between, and re-running when correct changes nothing)"
+    else
+      report WARN "6. Upgrade dispatcher timer" \
+        "systemd unavailable on this host, so nothing listens for the Forge 'schedule at next sleep' button -- scheduled upgrades will silently never run" \
+        "install the timer per runbook-upgrade-thriden.md § 7b; without it, engram/brain upgrades have no route (the synchronous path refuses them by design)"
+    fi
     return
   fi
   local unit="thriden-deploy-dispatch.timer"
@@ -653,8 +700,10 @@ check_scions() {
       sh -c 'curl -s -w "\n%{http_code}" -H "Authorization: Bearer $ENGRAM_RAVEN_TOKEN" http://localhost:3030/admin/embedding' 2>/dev/null || true)"
     emb_code="$(printf '%s' "$emb" | tail -n1)"
     emb_body="$(printf '%s' "$emb" | sed '$d')"
-    embed_cfg="$(printf '%s' "$emb_body" | jq -r '.voyage_configured // empty' 2>/dev/null)"
-    embed_ok="$(printf '%s' "$emb_body" | jq -r '.embedding_ok // empty' 2>/dev/null)"
+    # json_bool, NOT `// empty` -- see the helper. A `false` parsed with `//`
+    # arrives as "" and both verdicts below stop matching.
+    embed_cfg="$(printf '%s' "$emb_body" | json_bool .voyage_configured)"
+    embed_ok="$(printf '%s' "$emb_body" | json_bool .embedding_ok)"
     local embed_why
     embed_why="$(printf '%s' "$emb_body" | jq -r '.last_error_kind // empty' 2>/dev/null)"
 
@@ -727,8 +776,35 @@ check_scions() {
       200) report PASS "7. Scion '$s'" "engram+forge healthy, soul bound ($soul), canary fresh" ;;
       503) report WARN "7. Scion '$s'" "healthy + soul bound ($soul); brain is torpid so canary freshness is unverifiable (expected while sleeping)" \
              "no action if the Scion is meant to be asleep; a scheduled brain upgrade rouses + reads the canary itself" ;;
-      404) report FAIL "7. Scion '$s'" "healthy + soul bound ($soul) but NO canary planted (Tier 2 smoke would be skipped on a brain swap)" \
-             "plant one: POST /admin/canary/plant with an existing node_id (bin/thriden-scion-up.sh does this at bring-up)" ;;
+      404)
+        # 'No canary' is TWO states and only one is a fault. A brain with zero
+        # nodes CANNOT have one -- scion-up designates the NEWEST node, so a
+        # Scion that has not formed a memory yet has nothing to point at. That
+        # is every freshly-genesised Scion, i.e. every participant's first
+        # doctor run, and calling it FAIL tells them a correct install is
+        # broken (). A brain WITH content and no canary is the
+        # real gap: scion-up should have planted one and did not.
+        nodes_probe="$(docker compose "${files[@]}" exec -T "$esvc" \
+          sh -c 'curl -fsS -H \"Authorization: Bearer $ENGRAM_RAVEN_TOKEN\" \"http://localhost:3030/nodes?limit=1\"' \
+          2>/dev/null | tr -d '[:space:]')"
+        # THREE outcomes, not two. An unreadable probe (torpid brain, curl
+        # failure) yields an empty string, and treating that as 'has content'
+        # would assert a fault from a read that never happened -- the exact
+        # failure this check was just rewritten to stop making.
+        if [[ -z "$nodes_probe" ]]; then
+          report WARN "7. Scion '$s'" \
+            "healthy + soul bound ($soul); no canary planted, and the node count could not be read (brain may have gone torpid) so it is unclear whether that is expected" \
+            "re-run the doctor while the Scion is awake. If it has formed memories, bin/thriden-scion-up.sh <scion-id> plants the canary"
+        elif [[ "$nodes_probe" == "[]" ]]; then
+          report WARN "7. Scion '$s'" \
+            "healthy + soul bound ($soul); no canary yet because the brain has no memories to designate -- expected on a Scion this new, NOT a broken install" \
+            "it arms itself: once the Scion has formed its first memory, re-run bin/thriden-scion-up.sh <scion-id> (idempotent) and the canary is planted. Until then a brain swap soft-skips Tier 2 retrieval validation, which is fine for a brain with nothing to retrieve"
+        else
+          report FAIL "7. Scion '$s'" \
+            "healthy + soul bound ($soul) but NO canary planted, and this brain HAS content -- Tier 2 smoke would be skipped on a brain swap" \
+            "bin/thriden-scion-up.sh <scion-id> re-plants idempotently (it designates the newest node). Close to a scheduled upgrade and would rather not recreate containers? Plant directly: POST /admin/canary/plant with an existing node_id"
+        fi
+        ;;
       *)   report WARN "7. Scion '$s'" "healthy + soul bound ($soul); /admin/canary returned http $code" \
              "check the brain: docker compose ${COMPOSE[*]} -f compose-$s.yml logs $esvc" ;;
     esac
@@ -806,6 +882,137 @@ check_tree() {
     "check network / the mirror URL: git remote -v ; upgrades need 'git pull' to reach the mirror"
 }
 
+# ── Check 6b — a scheduled upgrade that can never fire ─────────────────────
+# The dispatcher can be perfectly healthy (check 6 PASS) and a scheduled
+# upgrade still never happen, because arming is PF's half and it hangs off a
+# path the operator may not have configured.
+#
+# PF's _check_deploy_payload has exactly ONE call site: _fire_sleep. That only
+# runs if the Scion has a `sleep_schedule`, which defaults to null and is
+# skipped outright when unset. So a Scion with no sleep schedule can never arm
+# a payload: Forge writes it, it sits `pending` forever, no error is recorded,
+# and it is indistinguishable from a schedule that has not come due yet.
+#
+# That is precisely what the first beta participant hit (): a
+# pending thriden-v0.20.0 payload with no dispatch_scion / dispatch_ready_at,
+# a green dispatcher polling for a signal nothing would ever send, and an
+# overnight wait for an upgrade that could not occur. Nothing on the host said
+# so, which is why this check exists -- capability, not liveness.
+check_deploy_armable() {
+  if (( ! wrapped )); then
+    report WARN "6b. Scheduled upgrades armable" \
+      "skipped: needs stack.enc.env for the Mongo query (see check 2)" ""
+    return
+  fi
+  if (( ! have_jq )); then
+    report WARN "6b. Scheduled upgrades armable" \
+      "skipped: reading the Scion sleep schedules needs jq (see check 0)" \
+      "install jq, then re-run"
+    return
+  fi
+  local js out n_total n_pending nosleep advanced oldest
+  js='const pend = db.deploy_payloads.find({status: "pending", dispatch_ready_at: {$exists: false}}, {created_at: 1}).toArray();
+const now = new Date();
+let oldest = -1;
+for (const p of pend) {
+  if (!p.created_at) continue;
+  const h = (now - new Date(p.created_at)) / 3600000;
+  if (h > oldest) oldest = h;
+}
+const s = db.scions.find({}, {scion_id: 1, sleep_schedule: 1}).toArray();
+const none = s.filter(x => !x.sleep_schedule).map(x => x.scion_id);
+// A schedule is "daily" only if it is a bare 5-field cron with day-of-month,
+// month, and weekday all wildcarded -- the same test PF applies to itself in
+// forge/admin/web/schedule_time.py:cron_to_time() to decide whether to show
+// the friendly HH:MM picker or fall back to "(advanced)". The picker is not
+// the only writer: forge/admin/ops.py:set_cron_schedule() (CLI + API) accepts
+// any croniter-valid expression, so a weekly (or rarer) schedule is real and
+// supported today, not a hypothetical future case.
+const advanced = s.filter(x => {
+  if (!x.sleep_schedule) return false;
+  const parts = String(x.sleep_schedule).trim().split(/\s+/);
+  return parts.length !== 5 || parts[2] !== "*" || parts[3] !== "*" || parts[4] !== "*";
+}).map(x => x.scion_id);
+print(JSON.stringify({total: s.length, pending: pend.length, nosleep: none, advanced: advanced, oldest_h: Math.round(oldest)}));'
+  out="$(doctor_mongo_eval "$js")"
+  if [[ -z "$out" ]]; then
+    report WARN "6b. Scheduled upgrades armable" \
+      "could not query mongodb for payloads/scions (container down?)" \
+      "bring the stack up, then re-run"
+    return
+  fi
+  # Parse the count FIRST and demand a number. Without this, a failed jq
+  # (absent, or mongosh prefixing a warning onto the JSON) yields empty strings,
+  # "nosleep" reads as "nothing missing", and this reports PASS -- a false green
+  # out of a parse failure. That is how check 5 once called a fine validator
+  # stale and check 7 called healthy containers "not created" ();
+  # the first draft of THIS check did it too. An unreadable answer is not a
+  # good answer.
+  n_total="$(printf '%s' "$out" | jq -r '.total' 2>/dev/null || true)"
+  if ! [[ "$n_total" =~ ^[0-9]+$ ]]; then
+    report WARN "6b. Scheduled upgrades armable" \
+      "could not parse the Mongo response, so this check is unverified (got: ${out:0:120})" \
+      "re-run; if it persists it is a doctor bug rather than a host problem"
+    return
+  fi
+  n_pending="$(printf '%s' "$out" | jq -r '.pending // 0' 2>/dev/null || echo 0)"
+  oldest="$(printf '%s' "$out" | jq -r '.oldest_h // -1' 2>/dev/null || echo -1)"
+  nosleep="$(printf '%s' "$out" | jq -r '(.nosleep // []) | join(", ")' 2>/dev/null || true)"
+  advanced="$(printf '%s' "$out" | jq -r '(.advanced // []) | join(", ")' 2>/dev/null || true)"
+
+  # Case 1 — no sleep schedule at all: arming is structurally impossible.
+  if [[ -n "$nosleep" ]]; then
+    if [[ "${n_pending:-0}" -gt 0 ]]; then
+      report FAIL "6b. Scheduled upgrades armable" \
+        "$n_pending payload(s) pending, but these Scions have no sleep_schedule so nothing can ever arm them -- the upgrade waits forever and records no error: $nosleep" \
+        "set a sleep schedule (pair it with a wake schedule) from each Scion's page in Forge; the pending payload arms at the next sleep, no re-scheduling needed"
+    else
+      report WARN "6b. Scheduled upgrades armable" \
+        "no sleep_schedule on: $nosleep. Nothing is pending now, but 'schedule at next sleep' would silently never fire for them" \
+        "set a sleep schedule (pair it with a wake schedule) before relying on scheduled upgrades"
+    fi
+    return
+  fi
+
+  # Case 2 — schedules exist, but a window demonstrably came and went.
+  # Forge's own time-picker only OFFERS a daily HH:MM cron, so a payload
+  # pending past ~26h (24h + slack) usually means a daily sleep window came
+  # and went unfired. But the picker is not the only writer: the CLI/API path
+  # (forge/admin/ops.py:set_cron_schedule) validates with croniter.is_valid
+  # only, so an operator can and does set a weekly (or rarer) schedule --
+  # PersonaForge's own UI already has an "(advanced)" display mode for exactly
+  # this. deploy_payloads doesn't yet reliably record which Scion a pending
+  # payload targets (scion_scope is optional, ), so this
+  # can't be joined per-payload -- if ANY Scion on the host runs a non-daily
+  # schedule, the 26h heuristic is not sound and asserting FAIL would just
+  # trade the old silent assumption for a loud wrong one. Downgrade to WARN
+  # in that case rather than manufacture false confidence either way.
+  #
+  # The usual cause of a genuine miss is the host not being awake at its own
+  # sleep time: powered off, suspended, or -- the case that found this --
+  # HIBERNATED, which looks "on" to the operator while the wall-clock window
+  # passes unfired ().
+  if [[ "${n_pending:-0}" -gt 0 && "${oldest:--1}" -ge 26 ]]; then
+    if [[ -n "$advanced" ]]; then
+      report WARN "6b. Scheduled upgrades armable" \
+        "a payload has been pending ${oldest}h, but these Scions run a non-daily sleep schedule, so the daily/26h heuristic doesn't apply and this is NOT conclusive evidence of a missed window: $advanced" \
+        "confirm by hand against the specific Scion's own cadence: docker logs <forge-container> | grep 'Cron sleep'"
+    else
+      report FAIL "6b. Scheduled upgrades armable" \
+        "a payload has been pending ${oldest}h and was never armed, though every Scion has a daily sleep schedule -- at least one sleep window passed without firing, so the Scion is not actually reaching sleep" \
+        "check the host was awake at the Scion's sleep time (hibernate/suspend/power-off all skip it silently); confirm with: docker logs <forge-container> | grep 'Cron sleep'"
+    fi
+    return
+  fi
+  if [[ "${n_pending:-0}" -gt 0 ]]; then
+    report PASS "6b. Scheduled upgrades armable" \
+      "$n_pending payload(s) pending ${oldest}h, every Scion has a sleep_schedule; arms at the next sleep"
+    return
+  fi
+  report PASS "6b. Scheduled upgrades armable" \
+    "every Scion has a sleep_schedule ($n_total checked); a scheduled upgrade can arm"
+}
+
 # ── Run all checks ─────────────────────────────────────────────────────────
 check_host_deps
 check_host_short
@@ -814,6 +1021,7 @@ check_ghcr
 check_sops_version
 check_validator
 check_dispatch_timer
+check_deploy_armable
 check_scions
 check_version_shadows
 check_tree

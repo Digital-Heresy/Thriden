@@ -185,6 +185,25 @@ fi
 # ── 5. Substrate: pull + recreate forge-web / nooscope / docker-socket-proxy ─
 # Host-short resolution lives inside compose-pull now (bin/thriden-host-short.lib.sh);
 # THRIDEN_HOST_SHORT is still honored via that chain.
+#
+# Tell forge-web where this checkout lives (exports THRIDEN_HOST_ROOT) so the
+# operator commands it renders point at a real path rather than the hardcoded
+# /srv/thriden. Sourced HERE, after the step-1 pull, so an upgrade that ships a
+# change to the library picks up the new one on this very run. Sourced in every
+# wrapper that recreates forge-web, so the value stays CONSISTENT -- a var set
+# by one wrapper and unset by another makes compose churn the container on
+# alternate runs.
+# Guarded: this rung is a convenience, so a tree missing the file must degrade
+# rather than abort a working upgrade -- but not silently, since the fallback
+# hands a custom-path operator commands pointing at /srv/thriden.
+# shellcheck source=bin/thriden-root.lib.sh
+if [ -f "$(dirname "$SELF")/thriden-root.lib.sh" ]; then
+  . "$(dirname "$SELF")/thriden-root.lib.sh"
+else
+  echo ">> WARN: bin/thriden-root.lib.sh missing; forge-web will fall back to its" >&2
+  echo "         /setup override (or /srv/thriden) for rendered commands." >&2
+fi
+
 echo ">> pulling substrate images ..." >&2
 bin/thriden-compose-pull.sh
 echo ">> recreating substrate (forge-web, nooscope, docker-socket-proxy) ..." >&2

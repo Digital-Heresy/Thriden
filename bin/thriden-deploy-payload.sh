@@ -256,6 +256,24 @@ for dep in "${required_deps[@]}"; do
   fi
 done
 
+# Tell forge-web where this checkout lives (exports THRIDEN_HOST_ROOT) so the
+# operator commands it renders point at a real path rather than the hardcoded
+# /srv/thriden. This wrapper recreates forge-web whenever FORGE_VERSION is a
+# swap target, so it must set the same value the other wrappers do -- a var set
+# by one and unset by another makes compose churn the container on alternate
+# runs. Sourced after the self-sync re-exec above, so a payload that ships a
+# change to the library uses the new one.
+# Guarded: a convenience rung must never abort a scheduled deploy (this path
+# runs unattended, in a torpor window, with no operator watching), but the
+# silent fallback would render /srv/thriden commands on a custom-path host.
+# shellcheck source=bin/thriden-root.lib.sh
+if [ -f "$(dirname "$0")/thriden-root.lib.sh" ]; then
+  . "$(dirname "$0")/thriden-root.lib.sh"
+else
+  echo "WARN: bin/thriden-root.lib.sh missing; forge-web will fall back to its" >&2
+  echo "      /setup override (or /srv/thriden) for rendered commands." >&2
+fi
+
 # shellcheck source=bin/thriden-host-short.lib.sh
 . "$(dirname "$0")/thriden-host-short.lib.sh"
 host_short="$(thriden_resolve_host_short "$host_short")"
@@ -666,24 +684,74 @@ while IFS= read -r s; do [[ -n "$s" ]] && engram_services+=("$s"); done < <(comp
 if [[ ${#engram_services[@]} -eq 0 ]]; then
   log info "no running engram-* services; pre-flight backup + deployable check + post-deploy torpor steps will be skipped"
 else
-  # Phase 2 deployable gate: refuse to proceed if any Scion has flipped
-  # deployable: false (long consolidation, mid-cycle work). See
+  # Phase 2 deployable gate: refuse to proceed if any Scion is reporting a
+  # FRESH deployable: false (long consolidation, mid-cycle work). See
   # docs/design-upgrade-at-wake.md "Sleep-cycle alignment".
+  #
+  # ⚠ This gate did nothing at all until , in two independent
+  # ways that each concealed the other:
+  #
+  #   1. Nothing ever POSTed /admin/deployable. The flag booted true and no
+  #      caller existed in either repo, so the check read a constant back and
+  #      logged it as a verified result. PF now derives and heartbeats it
+  #      (forge/core/deployable.py, ).
+  #   2. `.deployable // "unknown"` sent a genuine `false` down the PROCEED
+  #      branch. jq's `//` yields the right-hand side when the left is false
+  #      OR null, so the refusal below was unreachable even had the flag been
+  #      set. Verified against jq 1.7.1, not assumed. `has()` is the fix; do
+  #      not "simplify" it back to `//` on a boolean.
+  #
+  # Fixing either alone yields a gate that still cannot refuse, which is worse
+  # than none: two teams then believe a safety check exists.
+  #
+  # Staleness policy (the reader's half of PF's contract). PF derives this
+  # every beat and NEVER latches it, and deliberately pushes no parting `true`
+  # on shutdown -- so stopping a forge container mid-consolidation freezes
+  # `false` here with nothing alive to clear it. Obeying that forever means
+  # scheduled upgrades silently stop, which is this subsystem's third
+  # "waits forever, reports normal". So: a `false` older than the horizon is
+  # UNKNOWN, not a refusal. The accepted failure is "deployed when it might
+  # have waited"; the refused failure is "never deploys again".
+  #
+  # The horizon must exceed PF's THRIDEN_DEPLOYABLE_HEARTBEAT_SECONDS
+  # (default 30) by a wide margin. Raising PF's beat past this without raising
+  # this turns every false stale and silently disarms the gate again -- so the
+  # decision below LOGS both numbers rather than deciding quietly.
+  DEPLOYABLE_STALE_AFTER_SEC="${THRIDEN_DEPLOYABLE_STALE_AFTER_SEC:-300}"
   for svc in "${engram_services[@]}"; do
     health_json=$(docker compose "${compose_files[@]}" exec -T "$svc" \
       sh -c 'curl -fsS http://localhost:3030/health' 2>/dev/null || echo '{}')
-    deployable=$(echo "$health_json" | jq -r '.deployable // "unknown"')
+    deployable=$(echo "$health_json" \
+      | jq -r 'if has("deployable") then (.deployable|tostring) else "unknown" end')
+    # -1 == absent/null: either nothing has ever set the flag, or this engram
+    # predates the age field. Both mean "no freshness evidence".
+    deployable_age=$(echo "$health_json" | jq -r '.deployable_age_seconds // -1')
+    [[ "$deployable_age" =~ ^-?[0-9]+$ ]] || deployable_age=-1
+
     if [[ "$deployable" == "false" ]]; then
-      log error "$svc reports deployable: false -- refusing to proceed"
-      log error "this typically means the Scion is in a long consolidation or mid-cycle operation"
-      log error "wait for the next sleep cycle's natural settle, then retry"
-      set_result_field '.failure_kind' '"wrapper_error"'
-      finalize failed
-      exit 1
+      if [[ "$deployable_age" -lt 0 ]]; then
+        log warn "$svc reports deployable: false but UNDATED (engram too old to report deployable_age_seconds)"
+        log warn "  cannot tell a live busy signal from one leaked by a stopped forge; proceeding"
+        log warn "  upgrade engram to >= 0.12.0 to make this gate enforceable"
+      elif [[ "$deployable_age" -gt "$DEPLOYABLE_STALE_AFTER_SEC" ]]; then
+        log warn "$svc reports deployable: false, last set ${deployable_age}s ago (stale, horizon ${DEPLOYABLE_STALE_AFTER_SEC}s)"
+        log warn "  treating as UNKNOWN, not a refusal -- a false this old is far likelier to be"
+        log warn "  a leak from a stopped/crashed forge than a live signal; proceeding"
+      else
+        log error "$svc reports deployable: false, last set ${deployable_age}s ago (fresh, horizon ${DEPLOYABLE_STALE_AFTER_SEC}s)"
+        log error "this typically means the Scion is in a long consolidation or mid-cycle operation"
+        log error "wait for the next sleep cycle's natural settle, then retry"
+        set_result_field '.failure_kind' '"wrapper_error"'
+        finalize failed
+        exit 1
+      fi
     elif [[ "$deployable" == "unknown" ]]; then
       log warn "$svc /health gave no deployable field -- brain unreachable, or an engram too old to report it; proceeding without the gate"
+    elif [[ "$deployable_age" -lt 0 ]]; then
+      # true, but nothing has ever set it: the boot default, not a report.
+      log info "$svc deployable: true (boot default -- no orchestrator has reported yet)"
     else
-      log info "$svc deployable: true"
+      log info "$svc deployable: true (last set ${deployable_age}s ago)"
     fi
   done
 

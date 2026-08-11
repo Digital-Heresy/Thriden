@@ -217,6 +217,47 @@ plant_smoke_canary() {
 }
 plant_smoke_canary
 
+# ── Verify commands ────────────────────────────────────────────────────────
+# Print what actually WORKS, not the bare compose invocation. The operator's
+# shell is neither `deploy` nor inside $STACK_DIR, and every compose call
+# against this stack needs the decrypted stack env: docker-compose.yml gives
+# MONGO_ROOT_PASSWORD no default (`:?`), so a bare $BASE_COMPOSE dies with
+#
+#   error while interpolating services.mongodb.environment.MONGO_INITDB_ROOT_PASSWORD:
+#   required variable MONGO_ROOT_PASSWORD is missing a value
+#
+# before it ever reaches the service being asked about. Every internal op in
+# this script is already sops-wrapped, so the script did the right thing
+# throughout and then handed the operator advice that had drifted from its own
+# practice. The first beta participant to stand a Scion up hit exactly this and
+# had to re-wrap the command by hand ().
+#
+# SUDO_USER is set iff we came through the self-elevation above (or the
+# operator sudo'd in themselves) -- the same condition under which their own
+# shell needs the `sudo -u deploy` prefix to reach the stack dir and the age
+# key. Already running as `deploy`? The prefix is not just noise, it may not be
+# permitted, so print the plain form. Either way the `cd` is included: nothing
+# guarantees the operator's cwd, and both the compose files and $SECRETS are
+# relative paths.
+#
+# Quoting: `sops exec-env` takes its command as ONE shell string (it runs it via
+# `sh -c`), so the compose command is single-quoted inside the double-quoted
+# `bash -c` payload. No value interpolated below can contain a quote --
+# SCION_ID is charset-validated at the top of this script, $short is derived
+# from a rendered service name, and the rest are our own constants.
+verify_cmd() {
+  local inner="$BASE_COMPOSE -f $file $*"
+  if [ -n "${SUDO_USER:-}" ]; then
+    printf '     sudo -u %s -H bash -c "cd %s && sops exec-env %s '\''%s'\''"\n' \
+      "$DEPLOY_USER" "$STACK_DIR" "$SECRETS" "$inner"
+  else
+    printf '     cd %s && sops exec-env %s '\''%s'\''\n' \
+      "$STACK_DIR" "$SECRETS" "$inner"
+  fi
+}
+
 echo ">> up. verify the binding + health:" >&2
-echo "     $BASE_COMPOSE -f $file ps" >&2
-echo "     $BASE_COMPOSE -f $file exec engram-$short cat /data/instance.json" >&2
+verify_cmd ps >&2
+# -T (no TTY) so the command also works non-interactively -- the documented
+# remote form is `ssh <host> '<command>'`, which has no TTY to allocate.
+verify_cmd exec -T "engram-$short" cat /data/instance.json >&2

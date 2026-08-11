@@ -74,11 +74,13 @@ services:
       MONGO_URI: mongodb://${MONGO_ROOT_USER:-engram_admin}:${MONGO_ROOT_PASSWORD}@mongodb:27017/personaforge?authSource=admin
       MONGO_DB: personaforge
       FORGE_WEB_ADMIN_TOKEN: ${FORGE_WEB_ADMIN_TOKEN:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       BFL_API_KEY: ${BFL_API_KEY:-}
       SESSION_SECRET: ${SESSION_SECRET:-}
+      THRIDEN_HOST_ROOT: ${THRIDEN_HOST_ROOT:-}
       NOOSCOPE_URL: ${NOOSCOPE_URL:-}
+      NOOSCOPE_INTERNAL_URL: ${NOOSCOPE_INTERNAL_URL:-http://nooscope:8080}
     ports:
     - 127.0.0.1:8200:8200
     depends_on:

@@ -15,7 +15,7 @@
 #
 # Thin by design:
 #   - sleep-cycle gating is PF's (it only sets dispatch_ready_at at the sleep
-#     transition);
+#     transition, and only ONCE per payload — see the STALE_AFTER_MIN note);
 #   - the deployable check + swap/smoke/rollback is the wrapper's;
 #   - the wrapper's atomic `pending -> in_progress` claim is the race guard and
 #     stays UNCHANGED — once claimed a payload leaves the `pending` set, so it
@@ -39,7 +39,27 @@ STACK_DIR="${THRIDEN_STACK_DIR:-/srv/thriden}"
 BASE_COMPOSE=(docker compose -f docker-compose.yml -f compose.prod.yml)
 # A dispatch signal older than this is treated as stale and skipped — defends
 # against acting on a payload whose torpor window has long passed (the Scion
-# may be awake again). PF refreshes the signal each sleep cycle.
+# may be awake again).
+#
+# ⚠ THERE IS CURRENTLY NO RECOVERY FROM A STALE SIGNAL ().
+# This comment used to end "PF refreshes the signal each sleep cycle", which is
+# FALSE and was load-bearing: it made the skip below look safe. PF arms only
+# payloads where `dispatch_ready_at` does NOT exist
+# (forge/core/scheduler.py — the query and the guarded update both assert
+# `{"$exists": False}`), and nothing in either repo ever clears the field. So a
+# payload armed and then missed for STALE_AFTER_MIN is stuck PERMANENTLY:
+# PF will not re-arm it, this dispatcher will not act on it, its status stays
+# `pending` forever, and no dispatch_error is stamped — the wrapper never ran,
+# so there is nothing to record it. The operator sees an upgrade that is
+# eternally "scheduled".
+#
+# Any 2h window with no dispatcher run does it: timer disabled, host suspended
+# overnight, docker down, a wedged run holding the flock. Overnight is exactly
+# when upgrade-at-wake intends to deploy.
+#
+# The real fix is PF-side (re-arm when the signal is absent OR stale). Do NOT
+# "fix" it here by widening or removing the staleness guard — the guard is
+# correct and is what stops a deploy landing on an awake Scion.
 STALE_AFTER_MIN="${THRIDEN_DISPATCH_STALE_AFTER_MIN:-120}"
 
 cd "$STACK_DIR"
