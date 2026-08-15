@@ -353,8 +353,44 @@ if [[ -z "$result_file" ]]; then
   if [[ -n "$manifest" ]]; then
     result_file="${manifest%.json}.result.json"
   else
-    result_file="/srv/thriden/payloads/${mongo_id}.result.json"
-    mkdir -p "$(dirname "$result_file")"
+    # THRIDEN_HOST_ROOT, not a bare /srv/thriden: this mkdir runs as User=deploy
+    # long before the atomic claim below, so on a host whose checkout is
+    # elsewhere it dies pre-claim and the dispatcher stamps "wrapper exited 1
+    # before claiming: mkdir: Permission denied" (ThridenOps-1qdc, which blocked
+    # a beta operator's scheduled upgrade). The cure was already imported 80
+    # lines above and this line predated it.
+    #
+    # ⚠ NOT ${THRIDEN_STACK_DIR:-...}, even though all seven sibling wrappers
+    # use exactly that and matching them looks obviously right. That ladder is
+    # correct on SOME hosts and a silent no-op on others, which is worse than
+    # being wrong everywhere:
+    #
+    #   - thriden-deploy-dispatch.sh:38 assigns STACK_DIR as a LOCAL variable
+    #     and never exports it, and the shipped unit
+    #     (deploy/systemd/thriden-deploy-dispatch.service) has no Environment=
+    #     line. On the pi5 layout, a hand-installed unit, or a manual operator
+    #     run, THRIDEN_STACK_DIR is UNSET here and the ladder collapses back to
+    #     the literal -- the bug intact, looking more consistent than the fix.
+    #   - bin/thriden-wsl-systemd.sh:142 DOES write
+    #     `Environment=THRIDEN_STACK_DIR=...` into the drop-in it generates. So
+    #     on a WSL host the ladder would have worked.
+    #
+    # Note which way round that cuts: the WSL host is the one that REPORTED
+    # this bug, so the STACK_DIR fix would have tested clean on the reporter's
+    # machine and silently failed on the pi5 production layout -- the inverse
+    # of the usual works-on-ours-breaks-on-theirs, and it would have looked
+    # verified. THRIDEN_HOST_ROOT is the only form correct on both paths,
+    # because thriden-root.lib.sh derives it from ${BASH_SOURCE[0]}, which
+    # needs nothing from the environment. Measured on both, not reasoned.
+    result_file="${THRIDEN_HOST_ROOT:-/srv/thriden}/payloads/${mongo_id}.result.json"
+    if ! mkdir -p "$(dirname "$result_file")" 2>/dev/null; then
+      echo "ERROR: cannot create $(dirname "$result_file")" >&2
+      echo "       (resolved from THRIDEN_HOST_ROOT=${THRIDEN_HOST_ROOT:-<unset, defaulted>})" >&2
+      echo "       Running as $(id -un 2>/dev/null || echo '?'). Fix on the host:" >&2
+      echo "         sudo install -d -o $(id -un 2>/dev/null || echo deploy) -g $(id -gn 2>/dev/null || echo deploy) \\" >&2
+      echo "           '${THRIDEN_HOST_ROOT:-/srv/thriden}' '${THRIDEN_HOST_ROOT:-/srv/thriden}/payloads' '${THRIDEN_HOST_ROOT:-/srv/thriden}/backups'" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -674,8 +710,23 @@ smoke_tier_for() {
 
 # ── Pre-flight backup (engram only) ────────────────────────────────────
 
-backup_dir_root="/srv/thriden/backups"
-[[ -d "$backup_dir_root" ]] || mkdir -p "$backup_dir_root"
+# Same literal, same defect, same fix as the result_file line above -- see the
+# comment there for why this is THRIDEN_HOST_ROOT and not THRIDEN_STACK_DIR.
+# This one runs AFTER the claim, so it fails worse: the payload is already
+# claimed and is not cleanly reclaimable the way the pre-claim failure is. That
+# is why creating only payloads/ is not a valid interim unblock -- it leaves the
+# root itself unwritable and the next engram upgrade dies here instead
+# (ThridenOps-1qdc).
+backup_dir_root="${THRIDEN_HOST_ROOT:-/srv/thriden}/backups"
+if [[ ! -d "$backup_dir_root" ]] && ! mkdir -p "$backup_dir_root" 2>/dev/null; then
+  echo "ERROR: cannot create the pre-flight backup dir $backup_dir_root" >&2
+  echo "       (resolved from THRIDEN_HOST_ROOT=${THRIDEN_HOST_ROOT:-<unset, defaulted>})" >&2
+  echo "       This payload is already CLAIMED, so it will not re-arm on its own." >&2
+  echo "       Fix ownership on the host, then re-schedule from the Forge banner:" >&2
+  echo "         sudo install -d -o $(id -un 2>/dev/null || echo deploy) -g $(id -gn 2>/dev/null || echo deploy) \\" >&2
+  echo "           '${THRIDEN_HOST_ROOT:-/srv/thriden}' '${THRIDEN_HOST_ROOT:-/srv/thriden}/payloads' '$backup_dir_root'" >&2
+  exit 1
+fi
 
 engram_services=()
 while IFS= read -r s; do [[ -n "$s" ]] && engram_services+=("$s"); done < <(compose_services_for engram)

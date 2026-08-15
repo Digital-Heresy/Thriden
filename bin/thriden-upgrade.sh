@@ -127,8 +127,8 @@ fi
 # ── 2. Load the pinned umbrella versions ─────────────────────────────────────
 if [ ! -f "$VERSIONS_FILE" ]; then
   echo "ERROR: $VERSIONS_FILE not found after pull — this host predates the" >&2
-  echo "       versions.env model. Upgrade once via docs/runbook-upgrade-thriden.md" >&2
-  echo "       § Manual path, which also migrates you onto versions.env." >&2
+  echo "       versions.env model and needs a one-time migration onto it." >&2
+  echo "       Ask DH before upgrading — see beta-onboarding.md § 9." >&2
   exit 1
 fi
 set -a; . "./$VERSIONS_FILE"; set +a
@@ -165,7 +165,7 @@ ABORT: a running engram brain is on '$tag' but the pinned ENGRAM_VERSION is
        SCHEDULED / sleep-eligible path — it carries the pre-flight backup +
        post-flight canary smoke + auto-revert that this synchronous command
        does not. Schedule it from the Forge /scions banner instead.
-       See docs/runbook-upgrade-thriden.md § Scheduled path.
+       See beta-onboarding.md § 9 (B. Brain version change).
 EOF
       exit 1
     fi
@@ -178,8 +178,7 @@ if sops -d "$STACK_ENV" 2>/dev/null \
   echo "WARNING: $STACK_ENV still pins one or more *_VERSION vars (pre-tpo4)." >&2
   echo "         Those OVERRIDE deploy/versions.env, so this upgrade may be a" >&2
   echo "         no-op for the shadowed component(s). Migrate by removing those" >&2
-  echo "         lines: docs/runbook-upgrade-thriden.md § Migrating off" >&2
-  echo "         stack.enc.env version pins." >&2
+  echo "         *_VERSION lines from stack.enc.env (sops edit), then re-run." >&2
 fi
 
 # ── 5. Substrate: pull + recreate forge-web / nooscope / docker-socket-proxy ─

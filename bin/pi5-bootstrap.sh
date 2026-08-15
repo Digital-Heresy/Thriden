@@ -122,8 +122,8 @@ echo "[+] Phase 2 complete"
 echo
 echo "[+] pi5-bootstrap.sh DONE -- Phases 1 and 2 applied"
 echo
-echo "Next (operator-driven, see docs/pi5-bootstrap.md):"
-echo "  Phase 3 -- SOPS host age key (docs/secrets-ops.md § 6 or § 6a)"
+echo "Next (operator-driven):"
+echo "  Phase 3 -- SOPS host age key (secrets-setup.md § 2, then § 5 for the pull token)"
 echo "  Phase 4 -- ufw configuration + sshd verification"
 echo "  Phase 5 -- mongo smoke compose validation"
 echo "  Then -- Thriden stack deploy"

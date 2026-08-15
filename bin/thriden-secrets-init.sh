@@ -55,7 +55,7 @@ need_cmd openssl
 
 if [[ ! -f "$ENC_ENV" ]]; then
   echo "ERROR: encrypted stack env not found: $ENC_ENV" >&2
-  echo "       Populate the rotatable tier first (docs/secrets-ops.md 1f)." >&2
+  echo "       Populate the rotatable tier first (secrets-setup.md § 4)." >&2
   exit 1
 fi
 

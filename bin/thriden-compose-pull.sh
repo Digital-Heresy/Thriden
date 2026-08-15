@@ -93,7 +93,7 @@ stack_env="secrets/prod/stack.enc.env"
 if [[ ! -f "$host_env" ]]; then
   echo "ERROR: $host_env not found." >&2
   echo "Expected host-scoped credential at secrets/prod/hosts/<host>/host.enc.env." >&2
-  echo "See docs/secrets-ops.md § 6b.1 for first-time install." >&2
+  echo "Create it SOPS-encrypted with your GHCR_PULL_TOKEN: secrets-setup.md § 5." >&2
   exit 1
 fi
 
@@ -101,7 +101,7 @@ if [[ ! -f "$stack_env" ]]; then
   echo "ERROR: $stack_env not found." >&2
   echo "docker compose pull does variable interpolation before fetching" >&2
   echo "anything; the stack-tier env must be loadable for the merged" >&2
-  echo "compose graph to resolve. See docs/secrets-ops.md § 6." >&2
+  echo "compose graph to resolve. See secrets-setup.md § 4." >&2
   exit 1
 fi
 
@@ -194,7 +194,8 @@ ERROR: image pull failed — NOTHING was recreated, the running stack is untouch
   grants its siblings carry. Rotating the PAT will not fix that.
 
   Tell the two apart:  bin/thriden-doctor.sh   (checks 3 and 3b)
-  Operator remedy:     docs/secrets-ops.md § 6b.5.1 step 2 (grant Read per package)
+  Operator remedy:     grant the pulling account Read on each denied package
+                       (Org -> Packages -> <pkg> -> Settings -> Manage access)
 EOF
   exit "$pull_rc"
 fi

@@ -220,7 +220,7 @@ check_host_short() {
   if [[ -z "$host_short" ]]; then
     report FAIL "1. Host-short resolution" \
       "could not resolve a host-short name" \
-      "pin it once: echo <short> > .thriden-host-short  (or export THRIDEN_HOST_SHORT, or pass -h). runbook-provision-scion.md"
+      "pin it once: echo <short> > .thriden-host-short  (or export THRIDEN_HOST_SHORT, or pass -h)"
     return
   fi
   # Which chain step matched (mirrors thriden-host-short.lib.sh order).
@@ -260,7 +260,7 @@ check_secrets_decrypt() {
   esac
   if (( fail )); then
     report FAIL "2. Secrets decrypt" "$detail" \
-      "confirm your age key is at the SOPS_AGE_KEY_FILE / default path and is a recipient of these files. secrets-setup.md; secrets-ops.md § 6"
+      "confirm your age key is at the SOPS_AGE_KEY_FILE / default path and is a recipient of these files. secrets-setup.md § 2 (where the key lives), § 6 (round-trip check)"
   else
     report PASS "2. Secrets decrypt" "$detail"
   fi
@@ -411,11 +411,11 @@ GHCR_EOF
   if (( nocli )); then
     report WARN "3b. GHCR per-package pull authorization" \
       "unverifiable: this docker CLI has no usable 'docker manifest inspect'" \
-      "upgrade docker, or prove it by hand: bin/thriden-compose-pull.sh (a 'denied' on ONE image is a package grant, not an expired token — secrets-ops.md § 6b.5.1)"
+      "upgrade docker, or prove it by hand: bin/thriden-compose-pull.sh (a 'denied' on ONE image is a package grant, not an expired token — the fix is a Read grant on that package, not a new PAT)"
   elif [[ -n "$denied" ]]; then
     report FAIL "3b. GHCR per-package pull authorization" \
       "the credential is valid but the registry REFUSES $deniedn of $((okn+deniedn)) pinned image(s):"$'\n'"$(printf '%s' "$denied")" \
-      "this is a missing package grant, NOT an expired token — do not rotate the PAT. The operator must grant the pulling account Read on each package listed above (Org -> Packages -> <pkg> -> Settings -> Manage access). secrets-ops.md § 6b.5.1 step 2"
+      "this is a missing package grant, NOT an expired token — do not rotate the PAT. The operator must grant the pulling account Read on each package listed above (Org -> Packages -> <pkg> -> Settings -> Manage access), then re-run this check"
   elif [[ -n "$notag" ]]; then
     report FAIL "3b. GHCR per-package pull authorization" \
       "authorized, but the pinned tag does not exist in the registry:"$'\n'"$(printf '%s' "$notag")" \
@@ -550,7 +550,7 @@ check_dispatch_timer() {
     else
       report WARN "6. Upgrade dispatcher timer" \
         "systemd unavailable on this host, so nothing listens for the Forge 'schedule at next sleep' button -- scheduled upgrades will silently never run" \
-        "install the timer per runbook-upgrade-thriden.md § 7b; without it, engram/brain upgrades have no route (the synchronous path refuses them by design)"
+        "install the timer per beta-onboarding.md § 7b; without it, engram/brain upgrades have no route (the synchronous path refuses them by design)"
     fi
     return
   fi
@@ -560,7 +560,7 @@ check_dispatch_timer() {
   if [[ "$enabled" != "enabled" ]]; then
     report FAIL "6. Upgrade dispatcher timer" \
       "$unit is '${enabled:-not-installed}'" \
-      "install + enable: see deploy/systemd/thriden-deploy-dispatch.service header; runbook-upgrade-thriden.md § 7b"
+      "install + enable: see deploy/systemd/thriden-deploy-dispatch.service header; beta-onboarding.md § 7b"
     return
   fi
   active="$(systemctl is-active "$unit" 2>/dev/null || true)"
@@ -641,7 +641,7 @@ check_scions() {
       return
     fi
     report WARN "7. Scion health" "no compose-*.yml drop-ins here, and no unaccounted-for engram containers — no Scion provisioned yet" \
-      "provision your first Scion: beta-onboarding.md § 7 / runbook-provision-scion.md"
+      "provision your first Scion: beta-onboarding.md § 7"
     return
   fi
   if (( ! wrapped )); then
@@ -720,7 +720,7 @@ check_scions() {
     fi
     if [[ -z "$soul" ]]; then
       report FAIL "7. Scion '$s'" "running, but forge_soul_id is EMPTY in /data/instance.json (never fully genesis'd)" \
-        "re-provision the Scion soul binding: runbook-provision-scion.md"
+        "Genesis never completed for this Scion — re-run it in the admin UI (:8200), then bin/thriden-scion-up.sh <scion-id> to re-render. beta-onboarding.md § 7"
       continue
     fi
     # A brain rejecting our credential presents EXACTLY like a brain that cannot
@@ -842,7 +842,7 @@ check_tree() {
   elif [[ "$tag" == thriden-v* ]]; then pos="at tag $tag"
   else
     report WARN "9. Tree state" "HEAD is neither main nor a thriden-v* tag (branch='${branch:-detached}', describe='${tag:-none}')" \
-      "check out a release: git checkout thriden-v<x.y.z>  (or main). runbook-upgrade-thriden.md"
+      "check out a release: git checkout thriden-v<x.y.z>  (or main). beta-onboarding.md § 9"
     # keep going to also report cleanliness below
   fi
   # Cleanliness, ignoring sops re-encryption noise under secrets/ (j248).
