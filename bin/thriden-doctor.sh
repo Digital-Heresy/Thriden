@@ -851,15 +851,21 @@ check_tree() {
   # the status chars ('^.[ ?] secrets/') missed exactly that case and turned
   # benign sops diffs into a false FAIL.
   local dirt tracked untracked
-  # Exclude host-local files a correct install is SUPPOSED to have. The mirror
-  # does not ship a .gitignore covering them, so git reports the participant's
-  # own required config as strays — .sops.yaml and .thriden-host-short are
-  # literally created by following the onboarding guide, and compose-<short>.yml
-  # is written by scion-up. Flagging those trains people to ignore this check,
-  # which is the opposite of what it is for.
-  dirt="$(git status --porcelain 2>/dev/null \
-          | grep -vE '^...(secrets/|\.sops\.yaml|\.thriden-host-short|\.docker/|compose-[A-Za-z0-9._-]+\.yml)' \
-          || true)"
+  # secrets/ is the ONE exclusion that cannot be expressed as an ignore rule: on
+  # a DH host those files are TRACKED, and gitignore never applies to a tracked
+  # file. What is suppressed here is sops re-encryption noise -- a benign
+  # worktree diff on stack.enc.env (j248) -- not an untracked stray.
+  #
+  # Everything else this grep used to carry (.sops.yaml, .thriden-host-short,
+  # .docker/, compose-<short>.yml) now lives in a real ignore file: shipped to
+  # the mirror as .gitignore from deploy/gitignore, and mirrored into MindHive's
+  # own.gitignore for hosts running from a clone of this repo.
+  # That list was a second copy of a rule git already knows how to express, and
+  # it had already drifted -- it never covered .env, backups/, payloads/ or
+  # manifest-*.json, so Cairn kept WARNing on those four while the other five
+  # were silenced, which reads as "the fix did not work" rather than "the fix is
+  # in the wrong layer". Do not re-add paths here; add them to deploy/gitignore.
+  dirt="$(git status --porcelain 2>/dev/null | grep -vE '^...secrets/' || true)"
   tracked="$(printf '%s\n' "$dirt" | grep -E '^ ?[MADRCU]' || true)"
   untracked="$(printf '%s\n' "$dirt" | grep -E '^\?\?' || true)"
   if [[ -n "$tracked" ]]; then
@@ -867,7 +873,7 @@ check_tree() {
       "restore the recipe: git checkout -- <file>  (local edits to compose/scripts drift from the released recipe)"
   elif [[ -n "$untracked" ]]; then
     report WARN "9. Tree state" "$pos, clean tracked tree, but stray untracked file(s) present:"$'\n'"$(printf '%s' "$untracked" | sed 's/^/          /')" \
-      "review + remove strays (the '&1' incident was a stray redirect file). If intentional, add to .gitignore"
+      "review + remove strays (the '&1' incident was a stray redirect file). If intentional, add it to .git/info/exclude -- NOT to .gitignore, which is a tracked recipe file here and editing it flips this check to FAIL"
   else
     report PASS "9. Tree state" "$pos, clean (secrets/ sops noise ignored)"
   fi

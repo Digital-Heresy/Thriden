@@ -1,0 +1,64 @@
+# Thriden host checkout -- ignore the deploy tooling's own working files.
+#
+# Published to the PUBLIC Digital-Heresy/Thriden mirror AS `.gitignore` by
+# .github/workflows/sync-thriden-deploy.yml (an explicit rename, exactly like
+# README.md / LICENSE). It is deliberately NOT listed in
+# .github/thriden-deploy-manifest.txt: that allowlist copies paths verbatim and
+# has no rename support, and a second `.gitignore` cannot live at this repo root.
+#
+# WHY a purpose-built file rather than shipping MindHive's own .gitignore:
+# ours names venv/, engram/target/, node_modules/, dist/beta-participants/ and
+# the rest of the dev tree, which discloses repo structure the "lean public"
+# posture deliberately withholds (docs/beta-onboarding-design.md, the same
+# reason docs/ and the operator runbooks do not ship).
+#
+# WHAT it is for: thriden-doctor.sh check 9 reports stray untracked files so a
+# genuine stray stays visible (the '&1' incident -- a stray shell-redirect
+# file). Every path below is created by our OWN tooling on a correctly
+# functioning host, so without these rules check 9 WARNs forever and trains the
+# operator to read a non-green doctor as normal -- which is precisely the state
+# a real stray hides in. Measured on Cairn: 9 PASS / 1 WARN, nine listed files,
+# all ours.
+#
+# ⚠ NO RULE HERE MAY MATCH A PATH IN .github/thriden-deploy-manifest.txt.
+# The mirror publish step runs `git add -A` with this file already staged, so a
+# rule matching a NEWLY added manifest path would silently drop that file from
+# the mirror -- and the manifest's fail-closed check cannot catch it, because it
+# verifies the path exists in MindHive, not that it landed upstream. Already-
+# shipped paths are safe (they are in the mirror's index, where gitignore does
+# not apply), which is what makes this fail only for a future addition, and only
+# once. The workflow's "Assert every staged file landed in the mirror index"
+# step checks the end state directly; keep it if you edit this list.
+
+# Host-local config the operator creates by following the onboarding guide.
+.env
+.env.*
+.sops.yaml
+.thriden-host-short
+
+# The operator's own SOPS-encrypted secrets tree. Theirs, never ours, and it
+# must never be pushed anywhere. (On a DH host that clones MindHive instead of
+# the mirror these files are TRACKED, so this rule is inert there and check 9
+# keeps its own secrets/ exclusion for the sops re-encryption noise -- see the
+# note in bin/thriden-doctor.sh check 9.)
+secrets/
+
+# Isolated docker config dir, created by bin/thriden-compose-pull.sh so the GHCR
+# login never touches the operator's real ~/.docker/config.json.
+.docker/
+
+# Pre-flight /admin/export target (bin/thriden-deploy-payload.sh).
+backups/
+
+# Per-Scion compose drop-in, written by bin/thriden-scion-up.sh.
+# HYPHEN, not dot: this must not match the shipped compose.prod.yml, and it does
+# not match docker-compose.yml either (a no-slash pattern must match the whole
+# basename, which here has to start with `compose-`).
+compose-*.yml
+
+# Deploy-payload working files (bin/thriden-deploy-payload.sh). The second glob
+# is redundant against manifest-*.json and is spelled out anyway, because the
+# .result.json siblings are the ones that accumulate.
+payloads/
+manifest-*.json
+manifest-*.result.json
