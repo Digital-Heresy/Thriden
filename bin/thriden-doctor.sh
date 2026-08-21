@@ -515,7 +515,25 @@ print(v ? JSON.stringify(v) : "__NO_VALIDATOR__");'
         if [[ "$rq_s" != "$rq_l" ]]; then
           delta=" required[] differs -- shipped: [$rq_s]; live: [$rq_l]."
         else
-          delta=" Same top-level keys and required[]; the difference is nested (a property constraint)."
+          # Distinguish ANNOTATION drift from a real constraint difference
+          # instead of guessing. This branch used to assert "the difference is
+          # nested (a property constraint)", which was a guess and was WRONG on
+          # the one host it was read against: booklore's entire delta was 14
+          # `description` strings, and `description` constrains nothing
+          # Those are opposite operational answers -- annotation
+          # drift is "refresh at leisure", a constraint difference is "do not
+          # schedule an upgrade against this" -- so the check must not pick one
+          # by assumption. It cost a live investigation on a release day.
+          local want_c got_c
+          want_c="$(jq -cS 'walk(if type=="object" then del(.description, .title) else . end)' <<<"$want" 2>/dev/null)"
+          got_c="$(jq -cS 'walk(if type=="object" then del(.description, .title) else . end)' <<<"$got" 2>/dev/null)"
+          if [[ -n "$want_c" && "$want_c" == "$got_c" ]]; then
+            delta=" Difference is ANNOTATION TEXT ONLY (description/title) -- every constraint matches, so validation behaves identically. Cosmetic: refresh when convenient."
+          elif [[ -z "$want_c" || -z "$got_c" ]]; then
+            delta=" Same top-level keys and required[]; the difference is nested. (Could not classify it -- jq lacks walk/1?)"
+          else
+            delta=" Same top-level keys and required[]; a nested CONSTRAINT differs (not just description/title) -- validation behaviour is NOT identical."
+          fi
         fi
       fi
     else

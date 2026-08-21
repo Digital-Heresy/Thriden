@@ -218,13 +218,76 @@ echo ">> recreating substrate (forge-web, nooscope, docker-socket-proxy) ..." >&
 # freshness model the vendored image exists for. It is safe to
 # recreate unconditionally: the proxy is stateless, holds no volumes beyond the
 # :ro docker socket, and forge-web reconnects on its next request.
-COMPOSE_IGNORE_ORPHANS=true sops exec-env "$STACK_ENV" "$BASE_COMPOSE up -d forge-web nooscope docker-socket-proxy"
+# deploy-payloads-init is in this list for EXACTLY the reason docker-socket-proxy
+# is, one layer up. `git pull` above brings a new
+# schemas/deploy-payload-mongo.schema.json onto the host; nothing applies it to
+# Mongo, so the collection keeps validating against whatever was applied last.
+# Same silent no-op: the repo and the release notes both say the schema moved,
+# and the running validator did not.
+#
+# It had NEVER run on a production host. Not excluded by config -- the service
+# carries no `profiles:` key -- simply never named. Four docs
+# (docs/design-upgrade-at-wake.md:331, docs/operator-deploy.md, docs/secrets-ops.md,
+# .know/deployment.md) called it automatic "on every docker compose up", but this
+# deploy path never performs a bare `up`: thriden-deploy-payload.sh:890 refuses to
+# run without an explicit service list, because a bare one "would recreate every
+# service in the stack". So the documented trigger was one the surrounding system
+# is designed never to pull. Naming the service is what makes those docs true.
+#
+# Measured on booklore 2026-08-17 before the fix: the live validator differed from
+# the shipped schema in 14 lines, all of them `description` text -- harmless by
+# luck, and neither side could have told otherwise. PersonaForge's own gate
+# tests validator PRESENCE, not currency, so a stale-but-present
+# validator schedules an unattended upgrade without complaint.
+COMPOSE_IGNORE_ORPHANS=true sops exec-env "$STACK_ENV" "$BASE_COMPOSE up -d forge-web nooscope docker-socket-proxy deploy-payloads-init"
+
+# `up -d` returns once the one-shot is STARTED, so compose's exit code says
+# nothing about whether the collMod applied. Read the container's own code, or
+# this change just relocates the silent failure instead of fixing it -- which is
+# the defect class it exists to close.
+# Ask COMPOSE for the container id rather than composing "<proj>-<svc>-1" by
+# hand. Same principle the brain-swap guard adopted in § 3 and for the same
+# reason: the project prefix is not ours to guess (compose lowercases it, and
+# `proj` is not even defined in this script -- see).
+init_cid="$(sops exec-env "$STACK_ENV" "$BASE_COMPOSE ps -aq deploy-payloads-init" 2>/dev/null | tr -d '\r' | head -n1)"
+if [ -n "$init_cid" ]; then
+  init_rc="$(timeout 120 docker wait "$init_cid" 2>/dev/null | tr -d '\r' | head -n1)"
+  if [ "$init_rc" = "0" ]; then
+    echo ">> deploy_payloads validator applied (schema is current on this host)" >&2
+  elif [ -n "$init_rc" ]; then
+    echo "WARNING: deploy-payloads-init exited $init_rc -- the deploy_payloads validator may be" >&2
+    echo "         stale or unapplied. A scheduled upgrade will still be ACCEPTED regardless: the" >&2
+    echo "         Forge-side gate tests that a validator is PRESENT, not that it is CURRENT" >&2
+    echo ". So this will not announce itself later -- act on it now." >&2
+    echo "         Logs:   docker logs $init_cid" >&2
+    echo "         Repair: bin/thriden-deploy-payloads-setup.sh" >&2
+  else
+    echo "WARNING: deploy-payloads-init did not finish within 120s; validator state unverified." >&2
+    echo "         Check with: bin/thriden-doctor.sh   (check 5)" >&2
+  fi
+else
+  echo "WARNING: deploy-payloads-init produced no container -- the deploy_payloads validator was" >&2
+  echo "         NOT refreshed this run. Check with: bin/thriden-doctor.sh   (check 5)" >&2
+fi
 
 # ── 6. Per-Scion runtime: re-run scion-up (binding-safe) for each drop-in ────
 shopt -s nullglob
 for f in compose-*.yml; do
   short="${f#compose-}"; short="${short%.yml}"
-  cname="${proj}-forge-${short}-1"
+  # ⚠ This used to build "${proj}-forge-${short}-1", and `proj` HAS NOT EXISTED
+  # in this script since the § 3 brain-swap fix removed it. It
+  # expanded to "-forge-dm-1", which resolves to nothing, so `scion_id` came back
+  # empty and EVERY host fell into the skip branch below -- the per-Scion runtime
+  # upgrade, which is the main reason an operator runs this script, never ran.
+  # Verified on booklore 2026-08-17: real name `thriden-forge-dm-1`, built name
+  # `-forge-dm-1`, does not resolve.
+  #
+  # It warns rather than failing, and § 7 then prints "upgrade complete", so the
+  # summary contradicts the warning three lines earlier. Exactly what § 3's own
+  # comment warns about: a step that fails OPEN when it cannot see.
+  #
+  # Ask compose for the id; the project prefix is not ours to guess.
+  cname="$(sops exec-env "$STACK_ENV" "$BASE_COMPOSE -f $f ps -q forge-$short" 2>/dev/null | tr -d '\r' | head -n1)"
   scion_id="$(docker inspect "$cname" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
     | sed -n 's/^SCION_ID=//p' | head -n1)"
   if [ -z "$scion_id" ]; then
@@ -240,5 +303,28 @@ shopt -u nullglob
 
 # ── 7. Report ────────────────────────────────────────────────────────────────
 echo ">> upgrade complete. running images:" >&2
-docker ps --filter "name=${proj}-" --format '   {{.Names}}\t{{.Image}}\t{{.Status}}' \
+# Third and last `${proj}` consumer.
+#
+# ⚠ THE ORIGINAL ANALYSIS HERE WAS WRONG, and it was wrong in the reassuring
+# direction. It said this site was "benign by accident" -- that an undefined
+# ${proj} expanded empty, filtered on "name=-", matched most container names and
+# made the report look right. That describes a script WITHOUT `set -u`.
+#
+# Line 38 of this file is `set -euo pipefail`. Under `set -u` an unset ${proj} is
+# a FATAL ERROR, not an empty expansion. This site aborted the script, exit 1,
+# immediately after printing ">> upgrade complete." -- the worst possible place,
+# because the success line had already been emitted.
+#
+# Measured 2026-08-19, and the control is what settles it:
+#   with    set -euo pipefail -> `proj: unbound variable`, exit 1
+#   without set -u            -> `name=-`, exit 0   (the claimed behaviour)
+#
+# A beta tester hit exactly this: ">> upgrade complete. running images:" followed
+# by "line 243: proj: unbound variable". Reported by PersonaForge, who reproduced
+# it rather than reasoning about it.
+#
+# The lesson worth keeping: the expansion semantics were read correctly and the
+# SHELL OPTIONS in effect were never checked. Reading a line tells you nothing
+# about the environment it runs in.
+docker ps --format '   {{.Names}}\t{{.Image}}\t{{.Status}}' \
   | grep -iE 'forge|engram|nooscope' || true
