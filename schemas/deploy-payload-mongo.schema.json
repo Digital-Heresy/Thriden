@@ -92,7 +92,7 @@
       }
     },
     "scion_scope": {
-      "description": "Which Scions this payload targets, set by the Forge scheduler at write time. Either the string \"all\" or a non-empty array of Scion short names (e.g. [\"dm\"]). Consumed by PF's Scion-side orchestrator: it sets the dispatch signal (dispatch_scion/dispatch_ready_at) for its Scion only when scion_scope is \"all\", absent, or contains its short \u00e2\u20ac\u201d absent is treated tolerantly as applicable. NOT consumed by the on-host wrapper, which deploys whatever services run on its host. Optional; absent = unscoped.",
+      "description": "Which Scions this payload targets, set by the Forge scheduler at write time. Either the string \"all\" or a non-empty array of Scion short names (e.g. [\"dm\"]). Consumed by PF's Scion-side orchestrator: it sets the dispatch signal (dispatch_scion/dispatch_ready_at) for its Scion only when scion_scope is \"all\", absent, or contains its short -- absent is treated tolerantly as applicable. NOT consumed by the on-host wrapper, which deploys whatever services run on its host. Optional; absent = unscoped.",
       "oneOf": [
         {
           "enum": [
@@ -131,14 +131,14 @@
     },
     "claimed_by_scion": {
       "type": "string",
-      "description": "Set by the wrapper at claim time (atomic findOneAndUpdate from pending \u00e2\u2020\u2019 in_progress). The scion short name (e.g. 'helix'). Distinguishes which scion's orchestrator picked the payload up if multiple are scoped."
+      "description": "Set by the wrapper at claim time (atomic findOneAndUpdate from pending -> in_progress). The scion short name (e.g. 'helix'). Distinguishes which scion's orchestrator picked the payload up if multiple are scoped."
     },
     "triggered_at": {
       "description": "Set at claim time alongside claimed_by_scion.",
       "bsonType": "date"
     },
     "completed_at": {
-      "description": "Set when the wrapper last calls finalize(). For the normal terminal states (succeeded / rolled_back / failed) this marks genuine completion. For the crash-exit path the wrapper calls finalize(in_progress), so completed_at present with status=in_progress is the sentinel that the wrapper died mid-run and the doc is awaiting manual review \u00e2\u20ac\u201d it does NOT mean the payload finished successfully.",
+      "description": "Set when the wrapper last calls finalize(). For the normal terminal states (succeeded / rolled_back / failed) this marks genuine completion. For the crash-exit path the wrapper calls finalize(in_progress), so completed_at present with status=in_progress is the sentinel that the wrapper died mid-run and the doc is awaiting manual review -- it does NOT mean the payload finished successfully.",
       "bsonType": "date"
     },
     "result": {

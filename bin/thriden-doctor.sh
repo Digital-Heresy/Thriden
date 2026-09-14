@@ -169,7 +169,7 @@ printf '%s== Thriden doctor ==%s  host-short=%s  stack=%s\n\n' \
 # them. `jq` in particular used to fail INVISIBLY here: with it absent, check 5
 # compared two empty strings ("stale validator") and check 7 read empty state
 # out of `compose ps --format json` and declared healthy containers "not
-# created" — i.e. the doctor's own report was the misdiagnosis (Alex, b5d5
+# created" — i.e. the doctor's own report was the misdiagnosis (the b5d5
 # live run). Report the missing tool itself, and have the checks that need it
 # skip rather than invent a finding.
 have_jq=0; command -v jq >/dev/null 2>&1 && have_jq=1
@@ -541,7 +541,7 @@ print(v ? JSON.stringify(v) : "__NO_VALIDATOR__");'
     fi
     report WARN "5. deploy_payloads validator" \
       "validator present but DIFFERS from schemas/deploy-payload-mongo.schema.json (stale).${delta}" \
-      "refresh it: bin/thriden-deploy-payloads-setup.sh (it self-wraps under sops). A bare 'docker compose up' will NOT work on a prod-layout host -- compose needs MONGO_ROOT_PASSWORD from the encrypted stack env, so it must be: sops exec-env secrets/prod/stack.enc.env 'docker compose -f docker-compose.yml -f compose.prod.yml up -d deploy-payloads-init'"
+      "see WHAT differs before you overwrite it: bin/thriden-validator-diff.sh (read-only; self-locates, so any invocation path works; needs jq). Refreshing discards the evidence, and a jq-shaped hole once reported itself as a stale validator for four rounds -- this exact warning. Then refresh it: bin/thriden-deploy-payloads-setup.sh (it self-wraps under sops). A bare 'docker compose up' will NOT work on a prod-layout host -- compose needs MONGO_ROOT_PASSWORD from the encrypted stack env, so it must be: sops exec-env secrets/prod/stack.enc.env 'docker compose -f docker-compose.yml -f compose.prod.yml up -d deploy-payloads-init'"
   fi
 }
 

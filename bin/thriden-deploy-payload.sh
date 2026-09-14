@@ -1110,6 +1110,90 @@ if $recreate_failed; then
   exit 1
 fi
 
+# -- Substrate services no component swap can ever name -------
+#
+# A payload names COMPONENTS (engram / forge / nooscope), and
+# compose_services_for() can only ever resolve those to `^engram(-.+)?$`,
+# `^forge(-.+)?$` or `nooscope`. Nothing maps to docker-socket-proxy or
+# deploy-payloads-init, and :890 correctly refuses a bare `up -d` (it "would
+# recreate every service in the stack"). So on THIS path those two services are
+# not merely un-upgraded -- they can never be CREATED. The only thing that has
+# ever created them is thriden-upgrade.sh:239, which names them explicitly.
+#
+# A host that only upgrades via sleep windows therefore never gets them. Found
+# live on a beta host: docker-socket-proxy absent, while
+# forge-web -- which IS a swap target, since `^forge(-.+)?$` matches forge-web --
+# kept being recreated WITH the prod overlay and so carried DOCKER_HOST. PF keys
+# the proxy row expected_live off DOCKER_HOST being set rather than off the
+# proxy existing, so the release page read "partially confirmed" every day and
+# the log-tail route 502d. `restart: unless-stopped` was irrelevant throughout:
+# there was no container to restart.
+#
+# This is the SECOND instance of the class. was the first
+# (deploy-payloads-init "had NEVER run on a production host -- not excluded by
+# config, simply never named"), and it fixed only the manual path, leaving this
+# one identical and unchecked.
+#
+# WARNING: deploy-payloads-init IS DELIBERATELY NOT IN THIS LIST, even though it
+# has the identical never-named defect and sits right beside the proxy at
+# thriden-upgrade.sh:239. Creating it here would run collMod on deploy_payloads
+# WHILE THIS WRAPPER HOLDS A CLAIMED DOC IN THAT COLLECTION. MEASURED in
+# bin/deploy-payloads-validator.mongo.js:27-28 -- validationLevel "strict",
+# validationAction "error" -- so every subsequent write is validated and a
+# violation is rejected outright. A schema that the in-flight doc does not
+# satisfy would make finalize() fail at the last step of an otherwise good
+# unattended deploy, in a torpor window, with the payload already applied. That
+# is a worse failure than the staleness it would fix.
+#
+# So the residual gap is recorded rather than closed: a sleep-window-only host
+# still never refreshes its payload validator, and that is's
+# follow-up, not this hook. The safe place to run it is outside a payload
+# lifecycle -- which is exactly where the manual path already runs it.
+#
+# WARNING: --no-recreate IS THE WHOLE DESIGN. Create-if-absent, never reconcile.
+# Two reasons, and the first is a regression this would otherwise introduce:
+#
+#   1. THIS WRAPPER NEVER SOURCES deploy/versions.env (it only greps it, at
+#      :1383). So SOCKET_PROXY_VERSION is UNSET here and compose falls back to
+#      the `:-` literal baked into compose.prod.yml. Those two literals are kept
+#      in lockstep BY HAND (docs/versioning.md), and the moment they diverge an
+#      unconditional `up -d` from this path would recreate the proxy at the
+#      stale backstop -- silently DOWNGRADING what thriden-upgrade.sh had
+#      correctly set from versions.env. --no-recreate makes that unreachable:
+#      an existing container is never touched, whatever tag it is on.
+#   2. This runs unattended inside a torpor window. Creating a service that is
+#      absent can only improve the stack; recreating a healthy one is churn
+#      nobody is awake to watch, and it briefly drops the forge-web docker
+#      connection.
+#
+# So version CURRENCY for these two stays owned by the manual path, where
+# versions.env is actually sourced. Do not "finish the job" here without fixing
+# that sourcing gap first -- the gap is the reason for the flag, not an oversight.
+#
+# Chose --no-recreate over probing with `docker compose ps -aq <svc>`: MEASURED
+# on compose v5.3.1, `ps -a --services` lists every DEFINED service whether or
+# not a container exists (so it reads PRESENT for a service that was never
+# created -- a false negative for this check, in the reassuring direction), and
+# `ps -aq` returned EMPTY for seven services that demonstrably had containers.
+# Letting compose decide needs no probe to be correct.
+#
+# Deliberately non-fatal and outside the rollback path: the component swap has
+# already succeeded by this point, and a proxy that fails to come up is not a
+# reason to revert a good engram upgrade.
+reconcile_unnameable_substrate() {
+  # ONE service, deliberately -- see the deploy-payloads-init warning above
+  # before adding a second.
+  local svcs=(docker-socket-proxy)
+  log info "substrate reconcile: create-if-absent for ${svcs[*]}"
+  if sops exec-env "$stack_env"        "docker compose ${compose_files_q} up -d --no-recreate ${svcs[*]@Q}"        2>&1 | tee -a "/tmp/thriden-substrate-$run_id.log" >&2; then
+    log info "  substrate reconcile ok (existing containers left untouched)"
+  else
+    log warn "  substrate reconcile FAILED -- non-fatal, the component swap already succeeded"
+    log warn "  if the forge-web log-tail route 502s, run on the host: docker compose -f docker-compose.yml -f compose.prod.yml up -d docker-socket-proxy"
+  fi
+}
+reconcile_unnameable_substrate
+
 # ── Smoke tests ────────────────────────────────────────────────────────
 
 smoke_tier_0() {  # liveness: container reports running within 30s

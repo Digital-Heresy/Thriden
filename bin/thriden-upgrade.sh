@@ -228,7 +228,7 @@ echo ">> recreating substrate (forge-web, nooscope, docker-socket-proxy) ..." >&
 # It had NEVER run on a production host. Not excluded by config -- the service
 # carries no `profiles:` key -- simply never named. Four docs
 # (docs/design-upgrade-at-wake.md:331, docs/operator-deploy.md, docs/secrets-ops.md,
-# .know/deployment.md) called it automatic "on every docker compose up", but this
+# ../.know/deployment.md) called it automatic "on every docker compose up", but this
 # deploy path never performs a bare `up`: thriden-deploy-payload.sh:890 refuses to
 # run without an explicit service list, because a bare one "would recreate every
 # service in the stack". So the documented trigger was one the surrounding system
@@ -258,7 +258,7 @@ if [ -n "$init_cid" ]; then
     echo "WARNING: deploy-payloads-init exited $init_rc -- the deploy_payloads validator may be" >&2
     echo "         stale or unapplied. A scheduled upgrade will still be ACCEPTED regardless: the" >&2
     echo "         Forge-side gate tests that a validator is PRESENT, not that it is CURRENT" >&2
-    echo ". So this will not announce itself later -- act on it now." >&2
+    echo "         So this will not announce itself later -- act on it now." >&2
     echo "         Logs:   docker logs $init_cid" >&2
     echo "         Repair: bin/thriden-deploy-payloads-setup.sh" >&2
   else
