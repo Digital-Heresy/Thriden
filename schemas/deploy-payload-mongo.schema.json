@@ -238,7 +238,8 @@
             ]
           },
           "msg": {
-            "type": "string"
+            "type": "string",
+            "description": "Free text, EXCEPT for one recognized convention: a line pushed by log_substep_tail is prefixed `  [<step>] ` (two leading spaces, the failing sub-step's name in brackets, e.g. `  [thriden-compose-pull.sh] ` or `  [docker compose up (recreate)] `) ahead of a bounded tail of that sub-step's own captured output. parses this prefix to exclude tail lines from failure-point selection (the summary line before the tail is the actual failure point) and to style the tail as command output. Treat the prefix's exact shape (leading spaces, brackets, step name) as part of the contract, not incidental formatting."
           }
         }
       }
@@ -258,6 +259,68 @@
     "dispatch_error_at": {
       "description": "When the dispatcher stamped dispatch_error. Paired with it.",
       "bsonType": "date"
+    },
+    "diagnostics": {
+      "type": "object",
+      "description": "bin/thriden-doctor.sh --json snapshot, captured by finalize on any non-succeeded terminal status (failed / rolled_back / the crash-path in_progress) -- / ThridenOps-x5el, shape agreed with. Lets PF's /release failure view render the doctor's own findings in place of its doctor-not-run fallback. Absent on a succeeded payload and on documents that predate this field; best-effort (a doctor run that itself fails to produce valid JSON leaves this field unset rather than blocking finalize).",
+      "additionalProperties": false,
+      "required": [
+        "ran_at",
+        "exit_code",
+        "checks"
+      ],
+      "properties": {
+        "ran_at": {
+          "type": "string",
+          "description": "UTC ISO 8601 timestamp the doctor run started."
+        },
+        "exit_code": {
+          "bsonType": [
+            "int",
+            "long",
+            "double"
+          ],
+          "description": "thriden-doctor.sh's own exit code: 0 if no check FAILed (WARNs allowed), 1 if any FAILed. Accepts any numeric BSON type, not just int -- mongo_set_field's JSON.parse -> $set path serializes a plain JS number as BSON double, not int32 (no NumberInt() wrapping), so a strict bsonType:int would reject every real write from the wrapper."
+        },
+        "checks": {
+          "type": "array",
+          "description": "One entry per doctor check, in run order.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "label",
+              "level",
+              "detail",
+              "fix"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Doctor's own check number, e.g. '0', '3b', '6b'."
+              },
+              "label": {
+                "type": "string"
+              },
+              "level": {
+                "enum": [
+                  "PASS",
+                  "WARN",
+                  "FAIL"
+                ]
+              },
+              "detail": {
+                "type": "string"
+              },
+              "fix": {
+                "type": "string",
+                "description": "Remediation text; empty string when the check PASSed or carries none."
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

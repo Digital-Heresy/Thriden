@@ -15,6 +15,7 @@
 # who owns the sops age key:
 #   cd /srv/thriden && bin/thriden-doctor.sh
 #   bin/thriden-doctor.sh -h <host-short>     # override host-short resolution
+#   bin/thriden-doctor.sh --json              # machine-readable report (consumed by thriden-deploy-payload.sh)
 #
 # Exit code: 0 if no FAIL (WARN still allowed); nonzero if any check FAILs.
 # "All green" (zero WARN, zero FAIL) = the install is golden.
@@ -52,19 +53,43 @@
 set -uo pipefail
 
 # ── Arg parse ──────────────────────────────────────────────────────────────
+# Plain loop rather than getopts: --json is a long flag getopts can't mix
+# with a -h short option without extra plumbing.
 host_override=""
-for a in "$@"; do
-  case "$a" in
+json_mode=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --help|-\?)
       sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
-  esac
-done
-while getopts "h:" opt; do
-  case "$opt" in
-    h) host_override="$OPTARG" ;;
-    *) echo "usage: $0 [-h <host-short>]" >&2; exit 2 ;;
+    --json)
+      # Machine-readable mode (/ ThridenOps-x5el): emits ONE
+      # JSON object {ran_at, exit_code, checks:[{id,label,level,detail,fix}]}
+      # on stdout instead of the colored report, and nothing else touches
+      # stdout in this mode. Consumed by bin/thriden-deploy-payload.sh to
+      # attach a diagnostics snapshot to a failed payload's result doc --
+      # the same shape an operator would otherwise have to SSH in and run
+      # this script by hand to reconstruct (the 2026-09-15 Cairn incident).
+      json_mode=1
+      shift
+      ;;
+    -h)
+      # No -e in this script (deliberately, per the file header -- a doctor
+      # must not die mid-check), so a bad `shift 2` here wouldn't abort, it
+      # would leave $1 unconsumed and spin the loop forever. Guard the count
+      # explicitly rather than lean on set -e to catch it.
+      if [[ $# -lt 2 ]]; then
+        echo "usage: $0 [-h <host-short>] [--json]" >&2
+        exit 2
+      fi
+      host_override="$2"
+      shift 2
+      ;;
+    *)
+      echo "usage: $0 [-h <host-short>] [--json]" >&2
+      exit 2
+      ;;
   esac
 done
 
@@ -78,11 +103,12 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE=(-f docker-compose.yml -f compose.prod.yml)
 
 # ── Host-short resolution (shared lib; check 1 reports on it) ───────────────
-# host_override / host_short survive the sops re-exec below via env, because
-# `sops exec-env` accepts only TWO positionals (the file + a single sh-command
-# string) — re-passing argv through it breaks (compose-pull note 1). So we carry
-# the resolved values in DOCTOR_HOST_* and re-exec with just "$0".
+# host_override / host_short / json_mode survive the sops re-exec below via
+# env, because `sops exec-env` accepts only TWO positionals (the file + a
+# single sh-command string) — re-passing argv through it breaks (compose-pull
+# note 1). So we carry the resolved values in DOCTOR_* and re-exec with just "$0".
 host_override="${DOCTOR_HOST_OVERRIDE:-$host_override}"
+[[ "${DOCTOR_JSON:-0}" == 1 ]] && json_mode=1
 # shellcheck source=bin/thriden-host-short.lib.sh
 . "$script_dir/thriden-host-short.lib.sh"
 host_short="$(thriden_resolve_host_short "$host_override" 2>/dev/null || true)"
@@ -115,7 +141,7 @@ if [[ -z "${MONGO_ROOT_PASSWORD:-}" ]]; then
     export DOCTOR_HOST_DECRYPT=missing
   fi
   if [[ "$DOCTOR_STACK_DECRYPT" == "ok" ]]; then
-    export DOCTOR_HOST_SHORT="$host_short" DOCTOR_HOST_OVERRIDE="$host_override"
+    export DOCTOR_HOST_SHORT="$host_short" DOCTOR_HOST_OVERRIDE="$host_override" DOCTOR_JSON="$json_mode"
     exec sops exec-env "$stack_env" "$0"
   fi
 fi
@@ -133,15 +159,34 @@ else
   C_RESET=; C_PASS=; C_WARN=; C_FAIL=; C_DIM=; C_BOLD=
 fi
 n_pass=0; n_warn=0; n_fail=0
+doctor_ran_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+json_checks=()
 
 # report <PASS|WARN|FAIL> <title> <detail> [remediation]
+#
+# title is always "<id>. <label>" (e.g. "3b. GHCR per-package pull
+# authorization") -- --json mode splits on the first ". " to give the
+# machine reader an id distinct from the human label, rather than inventing
+# a second identifier callers would have to pass separately.
 report() {
   local status="$1" title="$2" detail="$3" fix="${4:-}"
+  case "$status" in
+    PASS) n_pass=$((n_pass+1)) ;;
+    WARN) n_warn=$((n_warn+1)) ;;
+    FAIL) n_fail=$((n_fail+1)) ;;
+  esac
+  if (( json_mode )); then
+    local id="${title%%. *}" label="${title#*. }"
+    json_checks+=("$(jq -nc --arg id "$id" --arg label "$label" --arg level "$status" \
+      --arg detail "$detail" --arg fix "$fix" \
+      '{id: $id, label: $label, level: $level, detail: $detail, fix: $fix}')")
+    return
+  fi
   local tag color
   case "$status" in
-    PASS) tag=" PASS "; color="$C_PASS"; n_pass=$((n_pass+1)) ;;
-    WARN) tag=" WARN "; color="$C_WARN"; n_warn=$((n_warn+1)) ;;
-    FAIL) tag=" FAIL "; color="$C_FAIL"; n_fail=$((n_fail+1)) ;;
+    PASS) tag=" PASS "; color="$C_PASS" ;;
+    WARN) tag=" WARN "; color="$C_WARN" ;;
+    FAIL) tag=" FAIL "; color="$C_FAIL" ;;
   esac
   printf '%s[%s]%s %s\n' "$color" "$tag" "$C_RESET" "$title"
   [[ -n "$detail" ]] && printf '        %s%s%s\n' "$C_DIM" "$detail" "$C_RESET"
@@ -161,7 +206,7 @@ doctor_mongo_eval() {
     2>/dev/null | tr -d '\r'
 }
 
-printf '%s== Thriden doctor ==%s  host-short=%s  stack=%s\n\n' \
+(( json_mode )) || printf '%s== Thriden doctor ==%s  host-short=%s  stack=%s\n\n' \
   "$C_BOLD" "$C_RESET" "${host_short:-<unresolved>}" "$(pwd)"
 
 # ── Check 0 — host command-line dependencies ───────────────────────────────
@@ -1050,6 +1095,20 @@ check_scions
 check_version_shadows
 check_tree
 
+doctor_exit=0
+(( n_fail > 0 )) && doctor_exit=1
+
+# ── JSON output (--json) ─────────────────────────────────────────────────
+# ONE object on stdout, nothing else -- a consumer (bin/thriden-deploy-
+# payload.sh) parses this directly. Shape agreed with
+# {ran_at, exit_code, checks: [{id, label, level, detail, fix}]}.
+if (( json_mode )); then
+  jq -n --arg ran_at "$doctor_ran_at" --argjson exit_code "$doctor_exit" \
+    --argjson checks "$(printf '%s\n' "${json_checks[@]}" | jq -s '.')" \
+    '{ran_at: $ran_at, exit_code: $exit_code, checks: $checks}'
+  exit "$doctor_exit"
+fi
+
 # ── Summary ────────────────────────────────────────────────────────────────
 printf '\n%s== Summary ==%s  %s%d PASS%s  %s%d WARN%s  %s%d FAIL%s\n' \
   "$C_BOLD" "$C_RESET" \
@@ -1059,11 +1118,11 @@ printf '\n%s== Summary ==%s  %s%d PASS%s  %s%d WARN%s  %s%d FAIL%s\n' \
 
 if (( n_fail > 0 )); then
   printf '%sNOT golden — resolve the FAIL(s) above before deploying or scheduling an upgrade.%s\n' "$C_FAIL" "$C_RESET"
-  exit 1
+  exit "$doctor_exit"
 elif (( n_warn > 0 )); then
   printf '%sMostly healthy, but not all green — review the WARN(s) above.%s\n' "$C_WARN" "$C_RESET"
-  exit 0
+  exit "$doctor_exit"
 else
   printf '%sAll green — this install is golden.%s\n' "$C_PASS" "$C_RESET"
-  exit 0
+  exit "$doctor_exit"
 fi

@@ -551,6 +551,34 @@ if [[ -n "$mongo_id" ]]; then
     exec "$self" "$@"
   fi
 
+  # Refresh the deploy_payloads validator before claiming anything
+  # ('s named follow-up, closed via / PersonaForge-
+  # rmk9 tie-out round 2). HERE, not in bin/thriden-deploy-dispatch.sh (tried
+  # first, moved after PF caught it): we're on THIS payload's target release
+  # tree now -- self-sync above already re-exec'd onto it, or
+  # THRIDEN_PAYLOAD_SYNCED was already set on entry -- so
+  # schemas/deploy-payload-mongo.schema.json on disk right now is the one
+  # this exact deploy needs live in Mongo, including on the very first
+  # scheduled deploy of a release that adds a field (the dispatcher runs
+  # from the pre-upgrade tree and would have applied the WRONG, pre-upgrade
+  # schema for that case). Nothing is claimed yet, so this is still the safe
+  # "outside a payload lifecycle" window the wrapper itself must never
+  # collMod inside of once claimed (see the WARNING near the substrate-
+  # services section). Reuses the same shared apply logic
+  # bin/deploy-payloads-validator.mongo.js -- still one copy. Best-effort,
+  # scoped export so MONGO_QUERY_SCHEMA doesn't leak into every later
+  # mongo_eval call this run makes.
+  schema_file="schemas/deploy-payload-mongo.schema.json"
+  validator_js="bin/deploy-payloads-validator.mongo.js"
+  if [[ -f "$schema_file" && -f "$validator_js" ]]; then
+    schema_json=$(jq -c . "$schema_file" 2>/dev/null || true)
+    if [[ -n "$schema_json" ]] && (export MONGO_QUERY_SCHEMA="$schema_json"; mongo_eval "$(cat "$validator_js")") >/dev/null 2>&1; then
+      echo "[mongo] deploy_payloads validator refreshed for this release" >&2
+    else
+      echo "[mongo] WARN: deploy_payloads validator refresh failed; proceeding with whatever validator is currently live (a stale validator may reject new fields on this write, not the payload itself)" >&2
+    fi
+  fi
+
   # Fetch + claim from Mongo. Write the input-shape subdoc out to a temp
   # file so the rest of the wrapper (which expects $manifest to be a JSON
   # file path) works unchanged.
@@ -595,6 +623,17 @@ jq -n \
     logs: []
   }' > "$result_file"
 
+# Set by finalize() once a terminal status (succeeded/failed/rolled_back) has
+# actually been written. The EXIT trap below uses this to tell "the wrapper
+# crashed with no one recording why" from "a controlled path already called
+# finalize and is now exiting non-zero on purpose" -- /
+# ThridenOps-x5el: before this flag existed, every finalize <status>; exit 1
+# sequence (the pull-failed and recreate-failed rollback paths, every
+# pre-smoke `finalize failed`) got its just-written status silently
+# overwritten back to in_progress by the trap, because the trap only looked
+# at $rc, never at whether finalize had already run.
+wrapper_finalized=0
+
 log() {
   local level="$1"; shift
   local msg="$*"
@@ -621,6 +660,54 @@ log() {
   fi
 }
 
+# Runs thriden-doctor.sh --json and attaches its output as .diagnostics on
+# any non-succeeded finalize() -- the same read-only check an operator would
+# otherwise SSH in and run by hand to explain a failed/rolled_back payload
+# (/ ThridenOps-x5el, the 2026-09-15 Cairn incident; shape
+# agreed with). Best-effort: a doctor run that itself can't
+# produce valid JSON must never stop finalize() from recording the actual
+# status it was called to set.
+#
+# Runs BEFORE the Mongo status push below, deliberately (
+# hash-out item 2): PF's completed_at gate relies on diagnostics landing in
+# the same finalize() call that sets completed_at, not a later one. That
+# means it must be BOUNDED, not just best-effort -- doctor's own docker
+# login, docker manifest inspect, the Voyage-authenticated curl, and mongosh
+# are all unbounded internally (only its git ls-remote has a timeout), and
+# the exact scenario capture_doctor_snapshot exists to diagnose -- a network
+# failure -- is exactly when docker login hangs rather than fails fast. A
+# call-site timeout was chosen over reordering (finalize()-then-doctor)
+# because reordering is what would break the ordering PF depends on.
+capture_doctor_snapshot() {
+  [[ -x ./bin/thriden-doctor.sh ]] || return 0
+  local diag timeout_sec="${THRIDEN_DOCTOR_SNAPSHOT_TIMEOUT_SEC:-60}"
+  # Bounded means bounded: if `timeout` itself isn't on PATH, refuse to run
+  # doctor.sh at all rather than falling through to an unbounded call. The
+  # whole reason this needs a bound (see comment above) is that doctor's own
+  # docker login / manifest inspect / curl / mongosh calls can hang on
+  # exactly the network trouble this snapshot exists to diagnose -- silently
+  # dropping the bound when `timeout` is missing would reintroduce that hang
+  # on every host lacking it, with no warning until an operator notices a
+  # stuck deploy (Copilot PR #285 review).
+  if ! command -v timeout >/dev/null 2>&1; then
+    echo "[doctor] WARN: 'timeout' not on PATH; refusing to run thriden-doctor.sh --json unbounded, diagnostics omitted" >&2
+    return 0
+  fi
+  # -k 10: if the monitored command ignores SIGTERM (or the signal never
+  # reaches the credential-handling process buried under doctor.sh's own
+  # `exec sops exec-env ...` self-re-exec -- unverified without a live host
+  # test), force SIGKILL 10s later rather than let `timeout` wait forever.
+  # Doesn't fully close that exec-chain gap (SIGKILL bypasses doctor.sh's own
+  # cleanup of the isolated GHCR docker-config dir the same as any other
+  # signal would) -- flagged as a follow-up, not resolved here.
+  diag="$(timeout -k 10 "$timeout_sec" ./bin/thriden-doctor.sh -h "$host_short" --json 2>/dev/null)" || true
+  if [[ -n "$diag" ]] && jq -e . >/dev/null 2>&1 <<<"$diag"; then
+    set_result_field '.diagnostics' "$diag"
+  else
+    echo "[doctor] WARN: thriden-doctor.sh --json produced no usable output; diagnostics omitted" >&2
+  fi
+}
+
 finalize() {
   local final_status="$1"
   local tmp
@@ -628,6 +715,9 @@ finalize() {
   jq --arg s "$final_status" --arg c "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '.status = $s | .completed_at = $c' "$result_file" > "$tmp"
   mv "$tmp" "$result_file"
+  wrapper_finalized=1
+
+  [[ "$final_status" != "succeeded" ]] && capture_doctor_snapshot
 
   if [[ -n "$MONGO_PAYLOAD_ID" ]]; then
     MONGO_QUERY_PAYLOAD_ID="$MONGO_PAYLOAD_ID" \
@@ -657,7 +747,24 @@ set_result_field() {
   fi
 }
 
-trap 'rc=$?; if [[ $rc -ne 0 ]]; then log error "wrapper exited with code $rc; status left as in_progress for manual review"; set_result_field .failure_kind "\"wrapper_error\""; finalize in_progress; fi; [[ -n "$mongo_manifest_tmp" ]] && rm -f "$mongo_manifest_tmp"' EXIT
+# A failing sub-step (compose pull, compose up) tees its output to a /tmp log
+# file for the full transcript, but that file never reached logs[]/Mongo --
+# the real cause (e.g. GHCR's "denied: denied") existed only in journald,
+# reachable only by SSH + journalctl (ThridenOps-x5el / the
+# 2026-09-15 Cairn incident). Push a bounded tail as error entries via the
+# existing log() plumbing instead of inventing a second logs[] shape. Capped
+# at 40 lines: enough to carry the actual error plus a little context, not
+# the whole transcript -- the /tmp file remains the full record.
+log_substep_tail() {
+  local step="$1" log_file="$2"
+  [[ -f "$log_file" ]] || return 0
+  local line
+  while IFS= read -r line; do
+    log error "  [$step] $line"
+  done < <(tail -n 40 "$log_file")
+}
+
+trap 'rc=$?; if [[ $rc -ne 0 && $wrapper_finalized -eq 0 ]]; then log error "wrapper exited with code $rc; status left as in_progress for manual review"; set_result_field .failure_kind "\"wrapper_error\""; finalize in_progress; fi; [[ -n "$mongo_manifest_tmp" ]] && rm -f "$mongo_manifest_tmp"' EXIT
 
 log info "wrapper started; manifest=$(realpath "$manifest"); run_id=$run_id"
 
@@ -1046,6 +1153,7 @@ log info "swap targets: substrate=[${swap_services[*]-}] scions=[${scion_swap_sh
 log info "pulling new images via bin/thriden-compose-pull.sh"
 if ! ./bin/thriden-compose-pull.sh -h "$host_short" "${compose_files[@]}" 2>&1 | tee -a /tmp/thriden-pull-$run_id.log >&2; then
   log error "compose pull failed; reverting pins"
+  log_substep_tail "thriden-compose-pull.sh" "/tmp/thriden-pull-$run_id.log"
   revert_pins
   set_result_field '.failure_kind' '"wrapper_error"'
   finalize rolled_back
@@ -1097,6 +1205,7 @@ if ! $recreate_failed && [[ ${#swap_services[@]} -gt 0 ]]; then
 fi
 if $recreate_failed; then
   log error "recreate failed; reverting pins + recreating originals"
+  log_substep_tail "docker compose up (recreate)" "/tmp/thriden-up-$run_id.log"
   revert_pins
   if [[ ${#scion_swap_shorts[@]} -gt 0 ]]; then
     recreate_scions || log error "  original-tag scion recreate also failed; stack in unknown state, manual review required"
@@ -1145,10 +1254,19 @@ fi
 # unattended deploy, in a torpor window, with the payload already applied. That
 # is a worse failure than the staleness it would fix.
 #
-# So the residual gap is recorded rather than closed: a sleep-window-only host
-# still never refreshes its payload validator, and that is's
-# follow-up, not this hook. The safe place to run it is outside a payload
-# lifecycle -- which is exactly where the manual path already runs it.
+# CLOSED (2026-09-15): a sleep-window-only host used to never
+# refresh its payload validator at all --'s named follow-up.
+# Refreshed now in THIS wrapper's own -i pre-claim block (after the self-
+# sync re-exec settles, before mongo_claim_payload), which is exactly the
+# "outside a payload lifecycle" safe point this comment used to say didn't
+# exist yet. First tried in bin/thriden-deploy-dispatch.sh, but that runs
+# from the host's CURRENT tree, before this wrapper's own self-sync checks
+# out the target release -- so a dispatcher-side refresh would apply the
+# WRONG, pre-upgrade schema on exactly the case that matters most: the
+# first scheduled deploy of a release that adds a field. Caught by
+#'s tie-out review, round 2. Forced by that same tie-out's
+# round 1, item 1:'s own new.diagnostics field would
+# otherwise never reach booklore, the host it was built for.
 #
 # WARNING: --no-recreate IS THE WHOLE DESIGN. Create-if-absent, never reconcile.
 # Two reasons, and the first is a regression this would otherwise introduce:

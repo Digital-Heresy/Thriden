@@ -151,6 +151,18 @@ if [[ -z "${ready//[$'\n\r\t ']/}" ]]; then
 fi
 
 # ── Run the wrapper for each (serial; the wrapper claims + executes) ───────
+#
+# NOTE ( tie-out round 2): the deploy_payloads
+# validator refresh deliberately does NOT live here, even though this looks
+# like the safe pre-claim point (see the WRAPPER's own comment near the
+# substrate-services section for the fuller history). This DISPATCHER still
+# runs from the host's CURRENT tree -- the wrapper self-syncs to the
+# payload's target release tag only AFTER it starts (git checkout + guarded
+# re-exec), so a refresh here would apply the PRE-upgrade
+# schema. The first scheduled deploy of a release that introduces a new
+# field is exactly the case that matters, and this location gets it wrong
+# for that case. The refresh lives in the wrapper instead, after its
+# self-sync re-exec settles and before its own claim.
 rc_any=0
 while read -r oid scion; do
   [[ -n "$oid" ]] || continue
