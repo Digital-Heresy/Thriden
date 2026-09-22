@@ -425,9 +425,25 @@ mongo_eval() {
     [[ "$name" == MONGO_QUERY_* && "$name" != MONGO_QUERY_JS ]] && env_flags+=(-e "$line")
   done < <(env -0)
 
+  # ⚠ `</dev/null` is load-bearing, not tidiness. `exec -T` is
+  # stdin-ATTACHED: without this redirect it inherits and DRAINS whatever the
+  # caller's stdin happens to be. `log()` mirrors every line through here, so a
+  # `log` inside any `while IFS= read -r ... done <<< "$list"` loop eats the
+  # rest of that list and the loop silently stops after one iteration.
+  #
+  # That is not hypothetical. It cost FORGE_RUNTIME_VERSION its place in the pin
+  # set on EVERY deploy for months: the capture loop below logs per-var, `forge`
+  # is the only component mapping to two vars, and the second one never
+  # survived. Every affected run still reported `succeeded` (see the bean for
+  # the full chain, including why a rollback then made it unclearable).
+  #
+  # Nothing here needs stdin -- the script crosses via `-e MONGO_QUERY_JS`
+  # precisely so it is NOT piped (see the comment above) -- so closing it is
+  # free, and it fixes the whole class rather than the one call site.
   docker compose "${compose_files[@]}" exec -T \
     "${env_flags[@]}" mongodb \
-    sh -c 'mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/personaforge?authSource=admin" --quiet --eval "$MONGO_QUERY_JS"'
+    sh -c 'mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/personaforge?authSource=admin" --quiet --eval "$MONGO_QUERY_JS"' \
+    </dev/null
 }
 
 mongo_read_thriden_version() {
@@ -1039,7 +1055,12 @@ pin_vars=()
 log info "capturing revert targets before pin (env override, else running-container tag)"
 for c in "${components[@]}"; do
   vars=$(env_vars_for "$c") || { log error "no env var mapping for component '$c'"; finalize failed; exit 1; }
-  while IFS= read -r var; do
+  # Read on FD 3, not stdin. The `</dev/null` in mongo_eval is
+  # the real fix; this is the belt to its braces, so that the NEXT command
+  # someone adds to this body cannot silently truncate the loop again. The
+  # failure mode leaves no trace: fewer iterations, no error, a `succeeded`
+  # deploy that under-delivers.
+  while IFS= read -r var <&3; do
     [[ -n "$var" ]] || continue
     pin_vars+=("$var")
     pin_tag[$var]="${new_tag[$c]}"
@@ -1057,7 +1078,7 @@ for c in "${components[@]}"; do
       fi
     fi
     log info "  $c: $var=${original_tag[$var]:-<none>} (${original_src[$var]}) → ${new_tag[$c]}"
-  done <<< "$vars"
+  done 3<<< "$vars"
 done
 
 # Make the pin set visible in the result doc + logs. The 2026-07-06 Cairn
@@ -1067,6 +1088,32 @@ done
 # eyeballed `docker ps`. Log the resolved pin set so a missing scion var is
 # caught immediately next time.
 log info "pin set: ${pin_vars[*]}"
+
+# ⚠ ASSERT it, don't just log it. The line above was added by
+# ru4g to make exactly this omission visible, and it DID print the truth on
+# every run for months — `pin set:` was short by FORGE_RUNTIME_VERSION every
+# single time and nobody read it. A log line only catches what someone reads;
+# the expected set is deterministic (env_vars_for over the manifest's
+# components), so compare against it and FAIL instead of hoping.
+#
+# Hard-fail rather than warn: a short pin set means the deploy will silently
+# under-deliver a component while reporting success, which is strictly worse
+# than not deploying. Recomputed here in a loop with no command in its body,
+# so it cannot be truncated by the same mechanism it exists to catch.
+expected_pin_vars=()
+for c in "${components[@]}"; do
+  while IFS= read -r var; do
+    [[ -n "$var" ]] || continue
+    expected_pin_vars+=("$var")
+  done <<< "$(env_vars_for "$c")"
+done
+if [[ "$(printf '%s\n' "${pin_vars[@]}" | sort)" != "$(printf '%s\n' "${expected_pin_vars[@]}" | sort)" ]]; then
+  log error "pin set is incomplete -- resolved [${pin_vars[*]}] but components [${components[*]}] require [${expected_pin_vars[*]}]"
+  log error "refusing to proceed: a short pin set deploys some components while silently leaving others on their current version"
+  set_result_field '.failure_kind' '"wrapper_error"'
+  finalize failed
+  exit 1
+fi
 
 # Belt-and-suspenders scion runtime/brain revert target. The
 # per-Scion runtime (forge-<short>) and brain (engram-<short>) are (re)rendered
