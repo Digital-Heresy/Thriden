@@ -62,7 +62,6 @@
 #   - compose files: docker-compose.yml + compose.prod.yml
 #   - host short: derived from `hostname -s` (matches secrets/prod/hosts/<short>/)
 #
-# Background: docs/secrets-ops.md § 6b
 
 set -euo pipefail
 

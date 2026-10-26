@@ -43,6 +43,12 @@
 #      or recall a single memory.
 #   8. No *_VERSION shadows in stack.enc.env (tpo4 discipline).
 #   9. Tree on a thriden-v* tag or main, clean (no stray files), remote reachable.
+#   10. Pinned vs ACTUALLY RUNNING image tags. Every check above reads intent
+#       (what the tree pins, what secrets carry, whether a deploy could fire);
+#       this reads what docker ps says is running, right now, against
+#       deploy/versions.env -- the gap that let/-5izg/-a52k ship
+#       or persist unnoticed. WARN, never FAIL; a stack.enc.env shadow (check 8)
+#       explains the drift rather than double-reporting it.
 #
 # Companion tooling this leans on:
 #   bin/thriden-host-short.lib.sh          (check 1)
@@ -1082,6 +1088,115 @@ print(JSON.stringify({total: s.length, pending: pend.length, nosleep: none, adva
     "every Scion has a sleep_schedule ($n_total checked); a scheduled upgrade can arm"
 }
 
+# ── Check 10 — pinned vs ACTUALLY RUNNING image tags ───────────────────────
+#
+# Every other check here reads intent: what the tree pins, what the secrets
+# carry, whether a deploy COULD fire. None of them read what is actually
+# running, and three separate incidents have now come from precisely that gap:
+#
+#  booklore ran engram v0.13.1 while versions.env had pinned
+#                  v0.13.2 since an earlier cut whose deploy died before the
+#                  swap. The release gate diffs consecutive PINS, so it saw
+#                  "engram unchanged" and waved through a release that then
+#                  deadlocked the attended path.
+#  forge-dm frozen at v0.25.0 for 8 weeks against a v0.27.0
+#                  pin, behind a stack.enc.env shadow no successful deploy
+#                  could clear. Every deploy reported succeeded; smoke passed,
+#                  because a stale container is a healthy one.
+#  docker-socket-proxy is reconciled --no-recreate on the
+#                  scheduled path (for a real reason -- see that comment), so
+#                  a SOCKET_PROXY_VERSION bump never lands on a host that
+#                  upgrades that way. booklore sat 2 base-image refreshes
+#                  behind, which is the freshness model exists
+#                  for quietly not happening.
+#
+# All three are one shape: PINNED != RUNNING, and nothing looks. Each was found
+# by a human squinting at `docker ps`. This is that squint, on every run.
+#
+# WARN, never FAIL: drift is not breakage, and a deliberate post-rollback
+# shadow is a legitimate reason to sit off the tree's pin. When
+# a shadow explains the drift this says so and points at check 8, rather than
+# reporting the same fact twice as if they were two problems.
+check_pins_vs_running() {
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    report WARN "10. Pins vs running" "skipped: docker not available" ""
+    return
+  fi
+  if [[ ! -r deploy/versions.env ]]; then
+    report WARN "10. Pins vs running" "skipped: deploy/versions.env not readable" ""
+    return
+  fi
+
+  # Which pin governs a given container. forge-web MUST be tested before the
+  # generic forge-* arm: it is substrate (FORGE_VERSION), not a per-Scion
+  # runtime (FORGE_RUNTIME_VERSION), and the two move independently.
+  _pin_var_for() {
+    case "$1" in
+      *-forge-web-1)           echo FORGE_VERSION ;;
+      *-nooscope-1)            echo NOOSCOPE_VERSION ;;
+      *-docker-socket-proxy-1) echo SOCKET_PROXY_VERSION ;;
+      *-engram-*-1)            echo ENGRAM_VERSION ;;
+      *-forge-*-1)             echo FORGE_RUNTIME_VERSION ;;
+      *)                       echo "" ;;
+    esac
+  }
+
+  local shadows=""
+  if [[ "$DOCTOR_STACK_DECRYPT" == "ok" ]]; then
+    shadows="$(sops -d --output-type dotenv "$stack_env" 2>/dev/null \
+      | grep -oE '^[A-Za-z_][A-Za-z0-9_]*_VERSION' | sort -u || true)"
+  fi
+
+  local drift="" explained="" checked=0 skipped_local=0
+  local line name image var pin tag
+  # FD 3, not stdin: a body command that reads stdin silently
+  # truncates a `while read` loop, and this body shells out to docker.
+  while IFS= read -r line <&3; do
+    [[ -n "$line" ]] || continue
+    name="${line%%	*}"; image="${line##*	}"
+    var="$(_pin_var_for "$name")"
+    [[ -n "$var" ]] || continue
+    # A locally BUILT image (dev host) carries no registry tag to compare --
+    # `mindhive-forge-web`, not `ghcr.io/...:v0.27.1`. Skipping is not leniency:
+    # on a dev box the pin genuinely does not govern, and a check that fires on
+    # every localhost run is a check people learn to ignore.
+    [[ "$image" == *:* ]] || { skipped_local=$((skipped_local+1)); continue; }
+    tag="${image##*:}"
+    pin="$(grep -E "^${var}=" deploy/versions.env 2>/dev/null | head -1 | cut -d= -f2-)"
+    [[ -n "$pin" ]] || continue
+    checked=$((checked+1))
+    [[ "$tag" == "$pin" ]] && continue
+    if grep -qx "$var" <<<"$shadows"; then
+      explained+="${name} running ${tag}, versions.env pins ${pin} (${var} is shadowed); "
+    else
+      drift+="${name} running ${tag}, versions.env pins ${pin} (${var}); "
+    fi
+  done 3< <(docker ps --format '{{.Names}}	{{.Image}}' 2>/dev/null)
+
+  if (( checked == 0 )); then
+    # ${skipped_local:+...} tests string-non-empty, not numeric-non-zero --
+    # "0" is a non-empty string, so that expansion fired on every zero-skip
+    # run too (no containers at all, or none matching a known name pattern),
+    # printing a bogus "(0 locally-built image(s) skipped)" aside. Gate on
+    # the numeric value instead.
+    local msg="no registry-tagged stack containers to compare"
+    (( skipped_local > 0 )) && msg+=" (${skipped_local} locally-built image(s) skipped -- dev host)"
+    report PASS "10. Pins vs running" "$msg"
+    return
+  fi
+  if [[ -z "$drift" && -z "$explained" ]]; then
+    report PASS "10. Pins vs running" "all ${checked} running image(s) match deploy/versions.env"
+    return
+  fi
+  if [[ -n "$drift" ]]; then
+    report WARN "10. Pins vs running" "UNEXPLAINED drift: ${drift%; }${explained:+ | shadow-explained: ${explained%; }}" \
+      "the host is not running what the tree pins, and no stack.enc.env shadow accounts for it. A scheduled deploy may have reported success without applying this component, or an earlier deploy died before the swap, or this component is reconciled --no-recreate on the scheduled path (docker-socket-proxy). Check the newest deploy_payloads row, then apply via the attended path: bin/thriden-upgrade.sh"
+  else
+    report WARN "10. Pins vs running" "drift explained by version shadow(s): ${explained%; }" \
+      "not unexplained -- a stack.enc.env shadow overrides deploy/versions.env by design (see check 8). Legitimate only as a deliberate post-rollback hold; if it is not, clear the shadow and the next deploy takes the pin: sops unset $stack_env '[\"<VAR>\"]'"
+  fi
+}
+
 # ── Run all checks ─────────────────────────────────────────────────────────
 check_host_deps
 check_host_short
@@ -1094,6 +1209,7 @@ check_deploy_armable
 check_scions
 check_version_shadows
 check_tree
+check_pins_vs_running
 
 doctor_exit=0
 (( n_fail > 0 )) && doctor_exit=1

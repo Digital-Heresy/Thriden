@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Digital-Heresy/MindHive/schemas/deploy-payload.schema.json",
   "title": "Thriden upgrade payload manifest (Phase 1)",
-  "description": "Manifest consumed by bin/thriden-deploy-payload.sh. Phase 1 is file-based; Phase 3 will reuse this shape as the input half of the Mongo deploy_payloads document. See docs/design-upgrade-at-wake.md.",
+  "description": "Manifest consumed by bin/thriden-deploy-payload.sh. Phase 1 is file-based; Phase 3 will reuse this shape as the input half of the Mongo deploy_payloads document.",
   "type": "object",
   "additionalProperties": false,
   "required": ["thriden_version", "components", "ordering"],

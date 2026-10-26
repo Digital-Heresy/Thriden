@@ -4,7 +4,7 @@
 # (pre-flight backup → pin → swap → smoke → promote-or-rollback →
 # torpor), writes a result file.
 #
-# Phase status (see docs/design-upgrade-at-wake.md):
+# Phase status:
 #   - Two manifest sources (Phase 3): `-m <file>` reads from a JSON file
 #     and writes status mirror to <file>.result.json; `-i <objectid>`
 #     fetches the full doc from Mongo's deploy_payloads collection
@@ -42,7 +42,6 @@
 # Compose-file paths cross to sops exec-env via env vars; component
 # names + image tags cross to docker / sops via argv arrays.
 #
-# Background: docs/design-upgrade-at-wake.md
 # Schema:     schemas/deploy-payload.schema.json
 
 set -euo pipefail
@@ -255,37 +254,124 @@ for dep in "${required_deps[@]}"; do
   fi
 done
 
-# Tell forge-web where this checkout lives (exports THRIDEN_HOST_ROOT) so the
-# operator commands it renders point at a real path rather than the hardcoded
-# /srv/thriden. This wrapper recreates forge-web whenever FORGE_VERSION is a
-# swap target, so it must set the same value the other wrappers do -- a var set
-# by one and unset by another makes compose churn the container on alternate
-# runs. Sourced after the self-sync re-exec above, so a payload that ships a
-# change to the library uses the new one.
-# Guarded: a convenience rung must never abort a scheduled deploy (this path
-# runs unattended, in a torpor window, with no operator watching), but the
-# silent fallback would render /srv/thriden commands on a custom-path host.
-# shellcheck source=bin/thriden-root.lib.sh
-if [ -f "$(dirname "$0")/thriden-root.lib.sh" ]; then
-  . "$(dirname "$0")/thriden-root.lib.sh"
-else
-  echo "WARN: bin/thriden-root.lib.sh missing; forge-web will fall back to its" >&2
-  echo "      /setup override (or /srv/thriden) for rendered commands." >&2
+stack_env="secrets/prod/stack.enc.env"
+if [[ ! -f "$stack_env" ]]; then
+  echo "ERROR: $stack_env not found" >&2
+  exit 1
 fi
 
-# shellcheck source=bin/thriden-host-short.lib.sh
-. "$(dirname "$0")/thriden-host-short.lib.sh"
-host_short="$(thriden_resolve_host_short "$host_short")"
+# ── Post-sync setup ─────────────────────────────────────
+#
+# Everything here used to run BEFORE the scheduled self-sync, and two of its
+# steps could die on a host that differs from ours -- the result-dir mkdir
+# (ThridenOps-1qdc / ted3) and the host-short / host-env resolution. A release
+# that FIXED either could then never reach the host it was written for: the
+# wrapper ran its own old code, died before git_sync_to_tag, and the fixed copy
+# never arrived through the very mechanism built to deliver it. The ordering was
+# the defect, and moving one mkdir would have left the class standing -- the next
+# pre-sync write re-arms it.
+#
+# The rule this function enforces by construction: the region BEFORE the sync
+# holds only what is needed to LEARN THE TARGET (arg checks, tool presence, the
+# stack env, the sops wrap, the compose file set, the Mongo read) and does no
+# filesystem writes. Anything else belongs here, after the tree is on the
+# payload's release. A pre-sync step that can fail on a host-specific condition
+# does not belong before the sync.
+#
+# File mode (-m) calls it at its old position (its -S sync is already earlier);
+# -i mode calls it after the re-exec, so the release's own copy runs it.
+post_sync_setup() {
+  # Tell forge-web where this checkout lives (exports THRIDEN_HOST_ROOT) so the
+  # operator commands it renders point at a real path rather than the hardcoded
+  # /srv/thriden. This wrapper recreates forge-web whenever FORGE_VERSION is a
+  # swap target, so it must set the same value the other wrappers do -- a var set
+  # by one and unset by another makes compose churn the container on alternate
+  # runs. Sourced after the self-sync re-exec above, so a payload that ships a
+  # change to the library uses the new one.
+  # Guarded: a convenience rung must never abort a scheduled deploy (this path
+  # runs unattended, in a torpor window, with no operator watching), but the
+  # silent fallback would render /srv/thriden commands on a custom-path host.
+  # shellcheck source=bin/thriden-root.lib.sh
+  if [ -f "$(dirname "$0")/thriden-root.lib.sh" ]; then
+    . "$(dirname "$0")/thriden-root.lib.sh"
+  else
+    echo "WARN: bin/thriden-root.lib.sh missing; forge-web will fall back to its" >&2
+    echo "      /setup override (or /srv/thriden) for rendered commands." >&2
+  fi
 
-host_env="secrets/prod/hosts/${host_short}/host.enc.env"
-stack_env="secrets/prod/stack.enc.env"
+  # shellcheck source=bin/thriden-host-short.lib.sh
+  . "$(dirname "$0")/thriden-host-short.lib.sh"
+  host_short="$(thriden_resolve_host_short "$host_short")"
 
-for f in "$host_env" "$stack_env"; do
-  if [[ ! -f "$f" ]]; then
-    echo "ERROR: $f not found" >&2
+  host_env="secrets/prod/hosts/${host_short}/host.enc.env"
+  if [[ ! -f "$host_env" ]]; then
+    echo "ERROR: $host_env not found" >&2
     exit 1
   fi
-done
+
+  if [[ -n "$mongo_id" ]]; then
+    # scion label defaults to the host short name in Mongo mode; the Scion-side
+    # orchestrator (PF) will normally pass an explicit one via -s when it
+    # invokes the wrapper from inside its forge-<scion> container.
+    [[ -z "$scion_label" ]] && scion_label="$host_short"
+  fi
+
+  # Default result file path: alongside the input manifest (file mode), or a
+  # fixed location based on the Mongo ObjectId (mongo mode). The result file
+  # is always written -- it's a local operator-readable copy of the status
+  # the wrapper would (also) push back to Mongo.
+  if [[ -z "$result_file" ]]; then
+    if [[ -n "$manifest" ]]; then
+      result_file="${manifest%.json}.result.json"
+    else
+      # THRIDEN_HOST_ROOT, not a bare /srv/thriden: this mkdir runs as User=deploy
+      # long before the atomic claim below, so on a host whose checkout is
+      # elsewhere it dies pre-claim and the dispatcher stamps "wrapper exited 1
+      # before claiming: mkdir: Permission denied" (ThridenOps-1qdc, which blocked
+      # a beta operator's scheduled upgrade). The cure was already imported 80
+      # lines above and this line predated it.
+      #
+      # ⚠ NOT ${THRIDEN_STACK_DIR:-...}, even though all seven sibling wrappers
+      # use exactly that and matching them looks obviously right. That ladder is
+      # correct on SOME hosts and a silent no-op on others, which is worse than
+      # being wrong everywhere:
+      #
+      #   - thriden-deploy-dispatch.sh:38 assigns STACK_DIR as a LOCAL variable
+      #     and never exports it, and the shipped unit
+      #     (deploy/systemd/thriden-deploy-dispatch.service) has no Environment=
+      #     line. On the pi5 layout, a hand-installed unit, or a manual operator
+      #     run, THRIDEN_STACK_DIR is UNSET here and the ladder collapses back to
+      #     the literal -- the bug intact, looking more consistent than the fix.
+      #   - bin/thriden-wsl-systemd.sh:142 DOES write
+      #     `Environment=THRIDEN_STACK_DIR=...` into the drop-in it generates. So
+      #     on a WSL host the ladder would have worked.
+      #
+      # Note which way round that cuts: the WSL host is the one that REPORTED
+      # this bug, so the STACK_DIR fix would have tested clean on the reporter's
+      # machine and silently failed on the pi5 production layout -- the inverse
+      # of the usual works-on-ours-breaks-on-theirs, and it would have looked
+      # verified. THRIDEN_HOST_ROOT is the only form correct on both paths,
+      # because thriden-root.lib.sh derives it from ${BASH_SOURCE[0]}, which
+      # needs nothing from the environment. Measured on both, not reasoned.
+      result_file="${THRIDEN_HOST_ROOT:-/srv/thriden}/payloads/${mongo_id}.result.json"
+      if ! mkdir -p "$(dirname "$result_file")" 2>/dev/null; then
+        echo "ERROR: cannot create $(dirname "$result_file")" >&2
+        echo "       (resolved from THRIDEN_HOST_ROOT=${THRIDEN_HOST_ROOT:-<unset, defaulted>})" >&2
+        echo "       Running as $(id -un 2>/dev/null || echo '?'). Fix on the host:" >&2
+        echo "         sudo install -d -o $(id -un 2>/dev/null || echo deploy) -g $(id -gn 2>/dev/null || echo deploy) \\" >&2
+        echo "           '${THRIDEN_HOST_ROOT:-/srv/thriden}' '${THRIDEN_HOST_ROOT:-/srv/thriden}/payloads' '${THRIDEN_HOST_ROOT:-/srv/thriden}/backups'" >&2
+        exit 1
+      fi
+    fi
+  fi
+}
+
+# File mode: nothing above moved the tree for it, but its -S sync (if any) already
+# ran at the top, so this is the same point in the lifecycle it always was.
+if [[ -z "$mongo_id" ]]; then
+  post_sync_setup
+fi
+
 
 # ── SOPS self-wrap (matches dispatcher/setup) ──────────────────────────
 # Every docker compose call below evaluates the compose graph, which needs
@@ -339,60 +425,8 @@ MONGO_PAYLOAD_ID=""
 mongo_manifest_tmp=""
 if [[ -n "$mongo_id" ]]; then
   MONGO_PAYLOAD_ID="$mongo_id"
-  # scion label defaults to the host short name in Mongo mode; the Scion-side
-  # orchestrator (PF) will normally pass an explicit one via -s when it
-  # invokes the wrapper from inside its forge-<scion> container.
-  [[ -z "$scion_label" ]] && scion_label="$host_short"
 fi
 
-# Default result file path: alongside the input manifest (file mode), or a
-# fixed location based on the Mongo ObjectId (mongo mode). The result file
-# is always written -- it's a local operator-readable copy of the status
-# the wrapper would (also) push back to Mongo.
-if [[ -z "$result_file" ]]; then
-  if [[ -n "$manifest" ]]; then
-    result_file="${manifest%.json}.result.json"
-  else
-    # THRIDEN_HOST_ROOT, not a bare /srv/thriden: this mkdir runs as User=deploy
-    # long before the atomic claim below, so on a host whose checkout is
-    # elsewhere it dies pre-claim and the dispatcher stamps "wrapper exited 1
-    # before claiming: mkdir: Permission denied" (ThridenOps-1qdc, which blocked
-    # a beta operator's scheduled upgrade). The cure was already imported 80
-    # lines above and this line predated it.
-    #
-    # ⚠ NOT ${THRIDEN_STACK_DIR:-...}, even though all seven sibling wrappers
-    # use exactly that and matching them looks obviously right. That ladder is
-    # correct on SOME hosts and a silent no-op on others, which is worse than
-    # being wrong everywhere:
-    #
-    #   - thriden-deploy-dispatch.sh:38 assigns STACK_DIR as a LOCAL variable
-    #     and never exports it, and the shipped unit
-    #     (deploy/systemd/thriden-deploy-dispatch.service) has no Environment=
-    #     line. On the pi5 layout, a hand-installed unit, or a manual operator
-    #     run, THRIDEN_STACK_DIR is UNSET here and the ladder collapses back to
-    #     the literal -- the bug intact, looking more consistent than the fix.
-    #   - bin/thriden-wsl-systemd.sh:142 DOES write
-    #     `Environment=THRIDEN_STACK_DIR=...` into the drop-in it generates. So
-    #     on a WSL host the ladder would have worked.
-    #
-    # Note which way round that cuts: the WSL host is the one that REPORTED
-    # this bug, so the STACK_DIR fix would have tested clean on the reporter's
-    # machine and silently failed on the pi5 production layout -- the inverse
-    # of the usual works-on-ours-breaks-on-theirs, and it would have looked
-    # verified. THRIDEN_HOST_ROOT is the only form correct on both paths,
-    # because thriden-root.lib.sh derives it from ${BASH_SOURCE[0]}, which
-    # needs nothing from the environment. Measured on both, not reasoned.
-    result_file="${THRIDEN_HOST_ROOT:-/srv/thriden}/payloads/${mongo_id}.result.json"
-    if ! mkdir -p "$(dirname "$result_file")" 2>/dev/null; then
-      echo "ERROR: cannot create $(dirname "$result_file")" >&2
-      echo "       (resolved from THRIDEN_HOST_ROOT=${THRIDEN_HOST_ROOT:-<unset, defaulted>})" >&2
-      echo "       Running as $(id -un 2>/dev/null || echo '?'). Fix on the host:" >&2
-      echo "         sudo install -d -o $(id -un 2>/dev/null || echo deploy) -g $(id -gn 2>/dev/null || echo deploy) \\" >&2
-      echo "           '${THRIDEN_HOST_ROOT:-/srv/thriden}' '${THRIDEN_HOST_ROOT:-/srv/thriden}/payloads' '${THRIDEN_HOST_ROOT:-/srv/thriden}/backups'" >&2
-      exit 1
-    fi
-  fi
-fi
 
 # ── Mongo helpers (Phase 3) ────────────────────────────────────────────
 #
@@ -566,6 +600,9 @@ if [[ -n "$mongo_id" ]]; then
     export THRIDEN_PAYLOAD_SYNCED=1
     exec "$self" "$@"
   fi
+
+  # Past the sync: on the payload's own release tree.
+  post_sync_setup
 
   # Refresh the deploy_payloads validator before claiming anything
   # ('s named follow-up, closed via / PersonaForge-
@@ -859,7 +896,7 @@ if [[ ${#engram_services[@]} -eq 0 ]]; then
 else
   # Phase 2 deployable gate: refuse to proceed if any Scion is reporting a
   # FRESH deployable: false (long consolidation, mid-cycle work). See
-  # docs/design-upgrade-at-wake.md "Sleep-cycle alignment".
+  # "Sleep-cycle alignment".
   #
   # ⚠ This gate did nothing at all before it was rebuilt, in
   # two independent ways that each concealed the other:
@@ -1321,7 +1358,7 @@ fi
 #   1. THIS WRAPPER NEVER SOURCES deploy/versions.env (it only greps it, at
 #      :1383). So SOCKET_PROXY_VERSION is UNSET here and compose falls back to
 #      the `:-` literal baked into compose.prod.yml. Those two literals are kept
-#      in lockstep BY HAND (docs/versioning.md), and the moment they diverge an
+#      in lockstep BY HAND, and the moment they diverge an
 #      unconditional `up -d` from this path would recreate the proxy at the
 #      stale backstop -- silently DOWNGRADING what thriden-upgrade.sh had
 #      correctly set from versions.env. --no-recreate makes that unreachable:

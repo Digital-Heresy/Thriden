@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Digital-Heresy/MindHive/schemas/deploy-payload-mongo.schema.json",
   "title": "Thriden upgrade payload manifest (Mongo collection shape, Phase 3)",
-  "description": "Document shape for the `personaforge.deploy_payloads` collection consumed by `bin/thriden-deploy-payload.sh -i <_id>`. Extends `deploy-payload.schema.json` (Phase 1 input shape) with wrapper-managed and PF-managed fields. Applied as the collection validator by `bin/thriden-deploy-payloads-setup.sh`. See docs/design-upgrade-at-wake.md.",
+  "description": "Document shape for the `personaforge.deploy_payloads` collection consumed by `bin/thriden-deploy-payload.sh -i <_id>`. Extends `deploy-payload.schema.json` (Phase 1 input shape) with wrapper-managed and PF-managed fields. Applied as the collection validator by `bin/thriden-deploy-payloads-setup.sh`.",
   "type": "object",
   "additionalProperties": false,
   "required": [

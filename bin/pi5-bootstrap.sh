@@ -3,7 +3,7 @@
 # pi5-bootstrap.sh -- bring a fresh Pi5 from "Docker installed" to "ready for
 # Thriden compose deploy". Idempotent: safe to re-run after partial completion.
 #
-# Automates Phases 1 (apt hygiene) and 2 (identity layer) of docs/pi5-bootstrap.md.
+# Automates Phases 1 (apt hygiene) and 2 (identity layer).
 # Phases 3 (SOPS host key), 4 (network hardening), 5 (smoke validation) are
 # operator-driven and stay manual -- see the doc for the procedures.
 #

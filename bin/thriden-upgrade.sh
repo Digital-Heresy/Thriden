@@ -17,7 +17,7 @@
 #                                       /admin/export + post-flight canary smoke
 #                                       + auto-revert that this synchronous path
 #                                       does NOT provide. See
-#                                       docs/runbook-upgrade-thriden.md.
+#
 #   4. legacy-override warning       — if stack.enc.env still pins *_VERSION
 #                                       (pre-tpo4), those shadow versions.env;
 #                                       warn so a no-op upgrade isn't a mystery.
@@ -226,9 +226,9 @@ echo ">> recreating substrate (forge-web, nooscope, docker-socket-proxy) ..." >&
 # and the running validator did not.
 #
 # It had NEVER run on a production host. Not excluded by config -- the service
-# carries no `profiles:` key -- simply never named. Four docs
-# (docs/design-upgrade-at-wake.md:331, docs/operator-deploy.md, docs/secrets-ops.md,
-# ../.know/deployment.md) called it automatic "on every docker compose up", but this
+# carries no `profiles:` key -- simply never named. Four docs called it automatic
+# "on every docker compose up"
+# but this
 # deploy path never performs a bare `up`: thriden-deploy-payload.sh:890 refuses to
 # run without an explicit service list, because a bare one "would recreate every
 # service in the stack". So the documented trigger was one the surrounding system

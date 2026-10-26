@@ -29,7 +29,6 @@
 # dispatch_error_at onto the still-pending doc so it's operator-visible without
 # journalctl.
 #
-# Design: docs/design-upgrade-at-wake.md § Resolved boundary (host dispatcher)
 # Seam:   schemas/deploy-payload-mongo.schema.json
 #         (dispatch_scion, dispatch_ready_at, dispatch_error, dispatch_error_at)
 set -euo pipefail

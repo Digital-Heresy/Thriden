@@ -20,7 +20,7 @@
 #
 # Idempotent: a key that is already present AND non-empty is left untouched, so
 # re-running is safe and a no-op once the stack env is populated. Hooks into the
-# first-boot secrets flow (docs/secrets-ops.md 1f / pi5-bootstrap / the beta
+# first-boot secrets flow (1f / pi5-bootstrap / the beta
 # participant walkthrough).
 #
 # Usage:
